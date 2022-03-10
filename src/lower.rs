@@ -1,16 +1,18 @@
+use std::borrow::Borrow;
 use std::{collections::HashMap, convert::TryInto};
 
-use crate::{upper, CheckConditionError, Error, StateCountError};
 use common::index::{self, StateTransition};
-use common::index::{Check, Command, ConfigFile, State, StateIndex};
+use common::index::{Check, ConfigFile, State, StateIndex};
 use heapless::Vec;
-use nova_software_common as common;
-use std::vec::Vec as StdVec;
+use toml::Spanned;
 
-struct Temp<'s>(HashMap<&'s str, StateIndex>);
+use crate::{upper, CheckConditionError, Error, StateCountError};
+use nova_software_common as common;
+
+struct Temp<'s>(HashMap<&'s str, (StateIndex, &'s Spanned<upper::State>)>);
 
 impl<'s> Temp<'s> {
-    fn new(states: &'s [upper::State]) -> Self {
+    fn new(states: &'s [Spanned<upper::State>]) -> Self {
         Self(
             states
                 .iter()
@@ -20,7 +22,7 @@ impl<'s> Temp<'s> {
 
                     // SAFETY: `i` comes from enumerate, which only yields indices in range
                     let index = unsafe { StateIndex::new_unchecked(i) };
-                    (state.name.as_str(), index)
+                    (state.get_ref().name.borrow(), (index, state))
                 })
                 .collect(),
         )
@@ -29,26 +31,34 @@ impl<'s> Temp<'s> {
     fn get_index(&self, name: &str) -> Result<StateIndex, Error> {
         self.0
             .get(name)
-            .copied()
             .ok_or_else(|| Error::StateNotFound(name.into()))
+            .map(|v| v.0)
+    }
+
+    fn get_span(&self, name: &str) -> Result<&'s Spanned<upper::State>, Error> {
+        self.0
+            .get(name)
+            .ok_or_else(|| Error::StateNotFound(name.into()))
+            .map(|v| v.1.clone())
     }
 }
 
 //When we go to a low level file, the default state must be first
 pub fn verify(mid: upper::ConfigFile) -> Result<ConfigFile, Error> {
-    if mid.states.len() == 0 {
+    if mid.states.get_ref().is_empty() {
         return Err(Error::StateCount(StateCountError::NoStates));
     }
-    if mid.states.len() > u8::MAX as usize {
+    if mid.states.get_ref().len() > u8::MAX as usize {
         return Err(Error::StateCount(StateCountError::TooManyStates(
-            mid.states.len(),
+            mid.states.get_ref().len(),
         )));
     }
 
-    let temp = Temp::new(&mid.states);
+    let temp = Temp::new(mid.states.get_ref().as_slice());
 
     let mut states: Vec<State, { common::MAX_STATES }> = mid
         .states
+        .get_ref()
         .iter()
         // At this point we dont know the indices for the checks or commands so put in filler data
         .map(|_| State::new(Vec::new(), Vec::new(), None))
@@ -57,17 +67,17 @@ pub fn verify(mid: upper::ConfigFile) -> Result<ConfigFile, Error> {
     let default_state = mid.default_state.map_or_else(
         // SAFETY: We have checked that there is at least one state above, so index 0 is in bounds
         || Ok(unsafe { StateIndex::new_unchecked(0) }),
-        |name| temp.get_index(&name),
+        |name| temp.get_index(name.borrow()),
     )?;
 
-    for (src_state, dst_state) in mid.states.iter().zip(states.iter_mut()) {
-        for src_check in &src_state.checks {
-            let check: index::Check = convert_check(src_check, &temp)?;
+    for (src_state, dst_state) in mid.states.get_ref().iter().zip(states.iter_mut()) {
+        for src_check in &src_state.get_ref().checks {
+            let check: index::Check = convert_check(src_check.get_ref(), &temp)?;
             dst_state.checks.push(check).unwrap();
         }
 
-        for src_command in &src_state.commands {
-            let command: index::Command = src_command.try_into().unwrap();
+        for src_command in &src_state.get_ref().commands {
+            let command: index::Command = src_command.get_ref().try_into().unwrap();
             dst_state.commands.push(command).unwrap();
         }
     }
@@ -112,7 +122,7 @@ fn convert_check(check: &upper::Check, temp: &Temp<'_>) -> Result<Check, Error> 
         Pyro2Continuity,
         Pyro3Continuity,
     }
-    let check_kind = match check.check.as_str() {
+    let check_kind = match check.check.borrow() {
         "apogee" => CheckKind::Apogee,
         "altitude" => CheckKind::Altitude,
         "pyro1_continuity" => CheckKind::Pyro1Continuity,
@@ -131,18 +141,18 @@ fn convert_check(check: &upper::Check, temp: &Temp<'_>) -> Result<Check, Error> 
 
     //The user only set one option, now map that to an object and state
     let condition = {
-        if let Some(gt) = check.greater_than {
-            CheckCondition::GreaterThan(gt)
-        } else if let (Some(u), Some(l)) = (check.upper_bound, check.lower_bound) {
+        if let Some(gt) = &check.greater_than {
+            CheckCondition::GreaterThan(*gt.get_ref())
+        } else if let (Some(u), Some(l)) = (&check.upper_bound, &check.lower_bound) {
             CheckCondition::Between {
-                upper_bound: u,
-                lower_bound: l,
+                upper_bound: *u.get_ref(),
+                lower_bound: *l.get_ref(),
             }
-        } else if let Some(flag) = &check.flag {
-            match flag.as_str() {
+        } else if let Some(flag) = check.flag.borrow() {
+            match flag.borrow() {
                 "set" => CheckCondition::FlagEq(true),
                 "unset" => CheckCondition::FlagEq(false),
-                _ => panic!("Unknown flag: {}", flag), // TODO: Better error handling
+                _ => panic!("Unknown flag: {}", flag.get_ref()), // TODO: Better error handling
             }
         } else {
             unreachable!()
@@ -185,12 +195,12 @@ fn convert_check(check: &upper::Check, temp: &Temp<'_>) -> Result<Check, Error> 
     };
 
     let transition = match &check.transition {
-        Some(state) => Some(temp.get_index(state.as_str())?),
+        Some(state) => Some(temp.get_index(state.borrow())?),
         None => None,
     };
 
     let abort = match &check.abort {
-        Some(state) => Some(temp.get_index(state.as_str())?),
+        Some(state) => Some(temp.get_index(state.borrow())?),
         None => None,
     };
 
@@ -208,36 +218,28 @@ fn convert_check(check: &upper::Check, temp: &Temp<'_>) -> Result<Check, Error> 
 mod tests {
     use common::{index::StateIndex, CheckData, FloatCondition, PyroContinuityCondition};
 
-    use crate::{upper, CheckConditionError};
-
+    use crate::{upper, upper::cs, CheckConditionError};
     use super::{common, index};
-
-    /// Used for format compatibility guarantees. Call with real encoded config files once we have
-    /// a stable version to maintain
-    fn assert_config_eq(bytes: Vec<u8>, config: common::index::ConfigFile) {
-        let decoded: common::index::ConfigFile = postcard::from_bytes(bytes.as_slice()).unwrap();
-        assert_eq!(decoded, config);
-    }
 
     #[test]
     fn basic1() {
         let upper = upper::ConfigFile {
-            default_state: Some("PowerOn".to_owned()),
-            states: vec![upper::State {
-                name: "PowerOn".to_owned(),
+            default_state: Some(cs("PowerOn".to_owned())),
+            states: cs(vec![cs(upper::State {
+                name: cs("PowerOn".to_owned()),
                 timeout: None,
-                checks: vec![upper::Check {
-                    name: "Takeoff".to_owned(),
-                    check: "altitude".to_owned(),
-                    greater_than: Some(100.0),
+                checks: vec![cs(upper::Check {
+                    name: cs("Takeoff".to_owned()),
+                    check: cs("altitude".to_owned()),
+                    greater_than: Some(cs(100.0)),
                     transition: None,
                     upper_bound: None,
                     flag: None,
                     lower_bound: None,
                     abort: None,
-                }],
+                })],
                 commands: vec![],
-            }],
+            })]),
         };
         use heapless::Vec;
 
@@ -265,38 +267,38 @@ mod tests {
     fn basic2() {
         let upper = upper::ConfigFile {
             default_state: None,
-            states: vec![
-                upper::State {
-                    name: "Ground".to_owned(),
+            states: cs(vec![
+                cs(upper::State {
+                    name: cs("Ground".to_owned()),
                     timeout: None,
-                    checks: vec![upper::Check {
-                        name: "Takeoff".to_owned(),
-                        check: "altitude".to_owned(),
-                        greater_than: Some(100.0),
+                    checks: vec![cs(upper::Check {
+                        name: cs("Takeoff".to_owned()),
+                        check: cs("altitude".to_owned()),
+                        greater_than: Some(cs(100.0)),
                         transition: None,
                         upper_bound: None,
                         flag: None,
                         lower_bound: None,
                         abort: None,
-                    }],
+                    })],
                     commands: vec![],
-                },
-                upper::State {
-                    name: "Launch".to_owned(),
+                }),
+                cs(upper::State {
+                    name: cs("Launch".to_owned()),
                     timeout: None,
-                    checks: vec![upper::Check {
-                        name: "Pyro1Cont".to_owned(),
-                        check: "pyro1_continuity".to_owned(),
+                    checks: vec![cs(upper::Check {
+                        name: cs("Pyro1Cont".to_owned()),
+                        check: cs("pyro1_continuity".to_owned()),
                         greater_than: None,
                         transition: None,
                         upper_bound: None,
-                        flag: Some("set".to_owned()),
+                        flag: Some(cs("set".to_owned())),
                         lower_bound: None,
                         abort: None,
-                    }],
+                    })],
                     commands: vec![],
-                },
-            ],
+                }),
+            ]),
         };
         use heapless::Vec;
 
@@ -350,22 +352,22 @@ mod tests {
     fn error_unknown_state() {
         let bad_name = "I do not exist!".to_owned();
         let upper = upper::ConfigFile {
-            default_state: Some(bad_name.clone()),
-            states: vec![upper::State {
-                name: "PowerOn".to_owned(),
+            default_state: Some(cs(bad_name.clone())),
+            states: cs(vec![cs(upper::State {
+                name: cs("PowerOn".to_owned()),
                 timeout: None,
-                checks: vec![upper::Check {
-                    name: "Takeoff".to_owned(),
-                    check: "altitude".to_owned(),
-                    greater_than: Some(100.0),
+                checks: vec![cs(upper::Check {
+                    name: cs("Takeoff".to_owned()),
+                    check: cs("altitude".to_owned()),
+                    greater_than: Some(cs(100.0)),
                     transition: None,
                     upper_bound: None,
                     flag: None,
                     lower_bound: None,
                     abort: None,
-                }],
+                })],
                 commands: vec![],
-            }],
+            })]),
         };
         check_error(super::verify(upper), crate::Error::StateNotFound(bad_name));
     }
@@ -374,21 +376,21 @@ mod tests {
     fn error_mutiple_subchecks() {
         let upper = upper::ConfigFile {
             default_state: None,
-            states: vec![upper::State {
-                name: "PowerOn".to_owned(),
+            states: cs(vec![cs(upper::State {
+                name: cs("PowerOn".to_owned()),
                 timeout: None,
-                checks: vec![upper::Check {
-                    name: "Check".to_owned(),
-                    check: "pyro1_continuity".to_owned(),
-                    greater_than: Some(100.0),
+                checks: vec![cs(upper::Check {
+                    name: cs("Check".to_owned()),
+                    check: cs("pyro1_continuity".to_owned()),
+                    greater_than: Some(cs(100.0)),
                     transition: None,
-                    upper_bound: Some(0.0),
-                    flag: Some("set".to_owned()),
-                    lower_bound: Some(0.5),
+                    upper_bound: Some(cs(0.0)),
+                    flag: Some(cs("set".to_owned())),
+                    lower_bound: Some(cs(0.5)),
                     abort: None,
-                }],
+                })],
                 commands: vec![],
-            }],
+            })]),
         };
         check_error(
             super::verify(upper),

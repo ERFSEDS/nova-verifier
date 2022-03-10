@@ -8,8 +8,12 @@ authors = [ "Troy Neubauer <troyneubauer@gmail.com>"]
 serde = "1.0.130"
 postcard = { version = "0.7.2", features = ["use-std"] }
 heapless = "0.7.5"
-serde_json = "1.0"
+serde_json = "1"
 toml = "0.5"
-thiserror = "1.0.30"
-
+thiserror = "1"
+anyhow = "1"
+clap = { version = "3", features = ["derive"] }
+log = "0.4"
+pretty_env_logger = "0.4"
 nova-software-common = { git = "https://github.com/ERFSEDS/nova-software-common.git", branch = "unsafe-is-fun" }
+miette = "4"
