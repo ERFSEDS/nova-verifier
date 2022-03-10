@@ -3,6 +3,8 @@
 
 pub mod lower;
 pub mod upper;
+pub mod error;
+pub use error::*;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CommandError {
