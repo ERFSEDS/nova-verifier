@@ -1,5 +1,5 @@
 [package]
-name = "verifier"
+name = "nova-verifier"
 version = "0.1.0"
 edition = "2021"
 authors = [ "Troy Neubauer <troyneubauer@gmail.com>"]
@@ -16,6 +16,4 @@ serde_json = "1.0"
 toml = "0.5"
 thiserror = "1.0.30"
 
-pyo3 = { version = "0.14", features = ["extension-module"] }
 nova-software-common = { git = "https://github.com/ERFSEDS/nova-software-common.git", branch = "unsafe-is-fun" }
-#nova-software-common = { path = "../../nova-software-common" }
