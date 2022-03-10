@@ -5,7 +5,7 @@ edition = "2021"
 authors = [ "Troy Neubauer <troyneubauer@gmail.com>"]
 
 [lib]
-name = "verifier"
+name = "nova-verifier"
 crate-type = ["cdylib"]
 
 [dependencies]
