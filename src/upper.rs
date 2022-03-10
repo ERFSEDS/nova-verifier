@@ -4,7 +4,7 @@
 //! high level bridge from the automated toml code and the low-level generator. This verify step only
 //! checks for valid toml. The returned [`ConfigFile`] may reference state or check names that don't
 //! exist, have negative timeouts, etc. This is the job of the low level verifier to check when it
-//! converts our [`ConfigFile`] to [`nova_software_common::ConfigFile`]
+//! converts our [`ConfigFile`] to [`nova_software_common::index::ConfigFile`]
 use common::index;
 use common::CommandObject;
 use nova_software_common as common;

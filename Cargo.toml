@@ -4,10 +4,6 @@ version = "0.1.0"
 edition = "2021"
 authors = [ "Troy Neubauer <troyneubauer@gmail.com>"]
 
-[lib]
-name = "nova-verifier"
-crate-type = ["cdylib"]
-
 [dependencies]
 serde = "1.0.130"
 postcard = { version = "0.7.2", features = ["use-std"] }
