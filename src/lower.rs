@@ -9,7 +9,7 @@ use toml::Spanned;
 use crate::{upper, CheckError, Context, Error, Span, StateCountError};
 use nova_software_common as common;
 
-struct Temp<'s>(HashMap<&'s str, StateIndex>);
+pub(crate) struct Temp<'s>(HashMap<&'s str, StateIndex>);
 
 impl<'s> Temp<'s> {
     fn new(states: &'s [Spanned<upper::State>]) -> Self {
@@ -28,7 +28,7 @@ impl<'s> Temp<'s> {
         )
     }
 
-    fn get_index(&self, name: &Spanned<String>, context: &Context<'_>) -> Result<StateIndex, ()> {
+    fn get_index(&self, name: &Spanned<String>, context: &mut Context) -> Result<StateIndex, ()> {
         match self.0.get(name.get_ref().as_str()) {
             Some(v) => Ok(*v),
             None => context.emitt_span_fatal(name, Error::StateNotFound(name.get_ref().to_owned())),
@@ -37,7 +37,7 @@ impl<'s> Temp<'s> {
 }
 
 // When we go to a low level file, the default state must be first
-pub fn verify(mid: upper::ConfigFile, context: &mut crate::Context<'_>) -> Result<ConfigFile, ()> {
+pub fn verify(mid: upper::ConfigFile, context: &mut crate::Context) -> Result<ConfigFile, ()> {
     if mid.states.get_ref().is_empty() {
         context.emitt_span(&mid.states, Error::StateCount(StateCountError::NoStates))?;
     }
@@ -84,7 +84,7 @@ pub fn verify(mid: upper::ConfigFile, context: &mut crate::Context<'_>) -> Resul
 
 pub(crate) fn convert_command(
     command: &Spanned<upper::Command>,
-    context: &mut Context<'_>,
+    context: &mut Context,
 ) -> Result<Command, ()> {
     let span = command;
     let command = command.get_ref();
@@ -113,19 +113,19 @@ pub(crate) fn convert_command(
     } else if count > 1 {
         // More than one assignment found, expected one
         let mut values: std::vec::Vec<Span> = std::vec::Vec::new();
-        if let Some(s) = command.pyro1 {
+        if let Some(s) = &command.pyro1 {
             values.push(s.into());
         }
-        if let Some(s) = command.pyro2 {
+        if let Some(s) = &command.pyro2 {
             values.push(s.into());
         }
-        if let Some(s) = command.pyro3 {
+        if let Some(s) = &command.pyro3 {
             values.push(s.into());
         }
-        if let Some(s) = command.data_rate {
+        if let Some(s) = &command.data_rate {
             values.push(s.into());
         }
-        if let Some(s) = command.becan {
+        if let Some(s) = &command.becan {
             values.push(s.into());
         }
         return context.emitt_span_fatal(
@@ -168,7 +168,7 @@ pub(crate) fn convert_command(
 pub(crate) fn convert_check(
     check: &Spanned<upper::Check>,
     temp: &Temp<'_>,
-    context: &mut Context<'_>,
+    context: &mut Context,
 ) -> Result<Check, ()> {
     let span = check;
     let check = check.get_ref();
@@ -194,14 +194,14 @@ pub(crate) fn convert_check(
     }
     if count > 1 {
         let mut spans: std::vec::Vec<Span> = std::vec::Vec::new();
-        if let Some(gt) = check.greater_than {
+        if let Some(gt) = &check.greater_than {
             spans.push(gt.into());
         }
-        if let (Some(u), Some(l)) = (check.greater_than, check.lower_bound) {
+        if let (Some(u), Some(l)) = (&check.greater_than, &check.lower_bound) {
             spans.push(u.into());
             spans.push(l.into());
         }
-        if let Some(flag) = check.flag {
+        if let Some(flag) = &check.flag {
             spans.push(flag.into());
         }
         return context.emitt_span_fatal(
@@ -226,9 +226,9 @@ pub(crate) fn convert_check(
         "pyro1_continuity" => CheckKind::Pyro1Continuity,
         "pyro2_continuity" => CheckKind::Pyro2Continuity,
         "pyro3_continuity" => CheckKind::Pyro3Continuity,
-        other => {
+        _ => {
             return context.emitt_span_fatal(
-                check.check,
+                &check.check,
                 Error::Custom(format!("unknown check `{check_name}`")),
                 // TODO: add note (valid values are ...)
             );
@@ -258,7 +258,7 @@ pub(crate) fn convert_check(
                 "unset" => CheckCondition::FlagEq(false),
                 _ => {
                     return context.emitt_span_fatal(
-                        check.check,
+                        &check.check,
                         Error::Custom(format!("unknown flag `{check_name}`")),
                         // TODO: add note (valid values are ...)
                     );
@@ -320,7 +320,7 @@ pub(crate) fn convert_check(
         (None, None) => None,
         (Some(_), Some(_)) => {
             return context.emitt_span_fatal(
-                check.check,
+                &check.check,
                 Error::Custom(format!(
                     "abourt and transition cannot be active in the same check"
                 )),
@@ -502,7 +502,7 @@ mod tests {
 
     fn check_ok(input: upper::ConfigFile, expected: index::ConfigFile) {
         let manager = SourceManager::new("".to_owned());
-        let context = manager.new_context();
+        let mut context = manager.new_context();
         let cfg_file = super::verify(input, &mut context);
         let errors = context.finish();
 
@@ -519,7 +519,7 @@ mod tests {
 
     fn check_error(input: upper::ConfigFile, expected: crate::Error) {
         let manager = SourceManager::new("".to_owned());
-        let context = manager.new_context();
+        let mut context = manager.new_context();
         let cfg_file = super::verify(input, &mut context);
         let errors = context.finish();
 

@@ -16,4 +16,5 @@ clap = { version = "3", features = ["derive"] }
 log = "0.4"
 pretty_env_logger = "0.4"
 nova-software-common = { git = "https://github.com/ERFSEDS/nova-software-common.git", branch = "unsafe-is-fun" }
-miette = { version = "4", features = ["fancy"] }
+codemap-diagnostic = "0.1.1"
+codemap = "0.1.3"

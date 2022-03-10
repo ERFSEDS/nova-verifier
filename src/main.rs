@@ -2,6 +2,9 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use log::*;
+use miette::{GraphicalReportHandler, GraphicalTheme, ReportHandler};
+use nova_verifier::{MutipleErrors, SourceManager};
+use std::{fmt::Formatter, rc::Arc};
 
 /// Command line utility for converting toml config files to .ncf files for the Nova Flight Computer
 #[derive(Parser, Debug)]
@@ -16,21 +19,35 @@ struct Args {
     output: String,
 }
 
-fn main() -> Result<()> {
+fn main() {
+    match run() {
+        Ok(()) => {}
+        Err(e) => {
+            println!("{:?}", e);
+            let mut out = String::new();
+            GraphicalReportHandler::new_themed(GraphicalTheme::unicode())
+                .render_report(&mut out, &e)
+                .unwrap();
+            print!("{out}");
+        }
+    }
+}
+
+fn run() -> Result<(), MutipleErrors> {
     pretty_env_logger::init();
     let args = Args::parse();
 
     let input = args.input;
     info!("Reading input file {input}");
-    let toml: String =
-        std::fs::read_to_string(&input).with_context(|| format!("Reading file `{input}`"))?;
+    let manager = SourceManager::open(&input).unwrap();
 
-    let bytes =
-        nova_verifier::verify(&toml).with_context(|| format!("Converting file `{input}`"))?;
+    let bytes = nova_verifier::verify(Arc::clone(&manager))?;
 
     let output = args.output;
     info!("Writing converted configuration to {output}");
-    std::fs::write(&output, bytes).with_context(|| format!("Writing file {output}"))?;
+    std::fs::write(&output, bytes)
+        .with_context(|| format!("Writing file {output}"))
+        .unwrap();
 
     Ok(())
 }

@@ -15,7 +15,7 @@ use toml::Spanned;
 
 use crate::Span;
 
-pub fn verify(toml: &str, context: &mut crate::Context<'_>) -> Result<ConfigFile, ()> {
+pub fn verify(toml: &str, context: &mut crate::Context) -> Result<ConfigFile, ()> {
     context.check(toml::from_str(toml))
 }
 
@@ -195,7 +195,7 @@ mod tests {
 
         fn check_verify(toml: &str, expected: ConfigFile) {
             let config = SourceManager::new(toml);
-            let context = config.new_context();
+            let mut context = config.new_context();
 
             let parsed = verify(toml, &mut context).unwrap();
             assert_eq!(parsed, expected);
@@ -304,7 +304,7 @@ greater_than = 100.0
         #[test]
         fn a() {
             let manager = SourceManager::new("");
-            let context = manager.new_context();
+            let mut context = manager.new_context();
             let expected = common::index::Command::new(
                 common::CommandObject::Pyro1(true),
                 common::Seconds(0.0),

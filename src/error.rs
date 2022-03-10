@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
-
-use miette::{Diagnostic, SourceSpan};
+use std::rc::Arc;
 
 enum ErrorSeverity {
     /// An unrecoverable error. Unrecoverable errors immediately bubble up the call stack
@@ -10,6 +9,99 @@ enum ErrorSeverity {
     /// diagnostics
     Recoverable,
 }
+
+
+pub struct DiagnosticBuilder<'a> {
+    diagnostic: Diagnostic,
+    handler: &'a Handler,
+}
+
+impl<'a> DiagnosticBuilder<'a> {
+    /// For internal use only, creates a new DiagnosticBuilder. For clients, the struct_* methods
+    /// on a Session or Handler should be used instead.
+    pub(crate) fn new(handler: &'a Handler, level: Level, message: impl Into<String>) -> Self {
+        let diagnostic = Diagnostic {
+            level,
+            message: message.into(),
+            primary: None,
+            spans: Vec::new(),
+            children: Vec::new(),
+        };
+
+        Self {
+            diagnostic,
+            handler,
+        }
+    }
+
+    pub fn set_primary_span(&mut self, span: Span) -> &mut Self {
+        self.diagnostic.primary = Some(span);
+
+        self
+    }
+
+    pub fn span_label(&mut self, span: Span, label: impl Into<String>) -> &mut Self {
+        self.diagnostic.spans.push((span, label.into()));
+
+        self
+    }
+
+    /// Adds a note message to the diagnostic
+    pub fn note(&mut self, message: impl Into<String>) -> &mut Self {
+        let subd = SubDiagnostic::new(Level::Note, message.into(), None);
+        self.diagnostic.children.push(subd);
+
+        self
+    }
+
+    /// Adds a note message with a separate span to the diagnostic
+    pub fn span_note(&mut self, span: Span, message: impl Into<String>) -> &mut Self {
+        let subd = SubDiagnostic::new(Level::Note, message.into(), Some(span));
+        self.diagnostic.children.push(subd);
+
+        self
+    }
+
+    /// Adds a help message to the diagnostic
+    pub fn help(&mut self, message: impl Into<String>) -> &mut Self {
+        let subd = SubDiagnostic::new(Level::Help, message.into(), None);
+        self.diagnostic.children.push(subd);
+
+        self
+    }
+
+    /// Adds a help message with a separate span to the diagnostic
+    pub fn span_help(&mut self, span: Span, message: impl Into<String>) -> &mut Self {
+        let subd = SubDiagnostic::new(Level::Help, message.into(), Some(span));
+        self.diagnostic.children.push(subd);
+
+        self
+    }
+
+    /// Queues this diagnostic to be emitted by the inner Handler/Emitter
+    pub fn emit(&mut self) {
+        if self.diagnostic.level == Level::Warning {
+            self.handler.warn(self.diagnostic.clone());
+        } else {
+            self.handler.error(self.diagnostic.clone());
+        }
+
+        // Mark this as cancelled so that it can be safely dropped
+        self.cancel();
+    }
+
+    /// Sets this DiagnosticBuilder as cancelled, meaning that it is safe to be dropped
+    pub fn cancel(&mut self) {
+        self.diagnostic.level = Level::Cancelled;
+    }
+
+    /// Returns true if this was cancelled, false otherwise
+    pub fn cancelled(&self) -> bool {
+        self.diagnostic.level == Level::Cancelled
+    }
+}
+
+
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum StateCountError {
@@ -70,8 +162,9 @@ impl PartialEq for Error {
             (Command(a), Command(b)) => a.eq(b),
             (CheckConditionError(a), CheckConditionError(b)) => a.eq(b),
             (NoStates, NoStates) => true,
-            (IO(a), IO(b)) => false,// TODO: Find a better way to do this. std::io::Error doesnt support eq
+            (IO(_), IO(_)) => false, // TODO: Find a better way to do this. std::io::Error doesnt support eq
             (Custom(a), Custom(b)) => a.eq(b),
+            _ => false,
         }
     }
 }
@@ -79,19 +172,22 @@ impl PartialEq for Error {
 #[derive(Diagnostic, Debug, thiserror::Error)]
 #[error("oops")]
 #[diagnostic()]
-pub struct OuterError<'s> {
+pub struct OuterError {
     inner: Error,
 
     #[label = "This is the highlight"]
     span: SourceSpan,
 
-    #[source_code]
-    src: &'s str,
+    manager: Arc<SourceManager>,
 }
 
-impl<'s> OuterError<'s> {
-    pub fn new(inner: Error, span: SourceSpan, src: &'s str) -> Self {
-        Self { inner, span, src }
+impl OuterError {
+    pub fn new(inner: Error, span: SourceSpan, manager: Arc<SourceManager>) -> Self {
+        Self {
+            inner,
+            span,
+            manager,
+        }
     }
 
     pub fn inner(&self) -> &Error {
@@ -101,14 +197,21 @@ impl<'s> OuterError<'s> {
 
 #[derive(Diagnostic, Debug, thiserror::Error)]
 #[error("oops2")]
-pub struct MutipleErrors<'s> {
+pub struct MutipleErrors {
     #[related]
-    inner: Vec<OuterError<'s>>,
+    inner: Vec<OuterError>,
 }
 
-impl<'s> MutipleErrors<'s> {
+impl MutipleErrors {
     pub(crate) fn new() -> Self {
         Self { inner: Vec::new() }
+    }
+
+    /// Creates a mutiple error collection from a single error with on span
+    pub(crate) fn from_single(error: Error, manager: Arc<SourceManager>) -> Self {
+        Self {
+            inner: vec![OuterError::new(error, EMPTY_SPAN.into(), manager)],
+        }
     }
 
     pub(crate) fn take(&mut self) -> Self {
@@ -116,37 +219,66 @@ impl<'s> MutipleErrors<'s> {
         Self { inner }
     }
 
-    pub fn errors(&self) -> &[OuterError<'s>] {
+    pub fn errors(&self) -> &[OuterError] {
         &self.inner
     }
+
+    pub(crate) fn errors_mut(&mut self) -> &mut [OuterError] {
+        &mut self.inner
+    }
+}
+
+/// The top level helper struct for opening and verifing toml files. 
+/// 
+/// First, open a file with [`Self::open_file`], any errors generated when opening the file will be
+/// saved into this session, and will be available when calling [`Self::end_phase`].
+///
+/// Once a file is open, phase processing can begin.
+/// Verification/compilation works as usual, with the calling code doing as much work as possible
+/// on a bad config file to give the most amount of diagnostics to the user.
+/// At the end of each logical phase, call [`Self::end_phase`] to get the list of errors emitted
+/// during that phase. Normal implementations should stop proceding through phases as soon as a
+/// phase completes with errors.
+pub struct Session {
+    inner: codemap::CodeMap,
+}
+
+impl Session {
+    pub fn open_file<'s>(&'s mut self, path: String) -> Result<Context<'s>, ()> {
+
+    }
+}
+
+pub struct Context<'s> {
+    session: &'s mut Session,
+    span: codemap::Span,
 }
 
 /// Manages a single source file
+#[derive(Debug)]
 pub struct SourceManager {
-    file: PathBuf,
-    src: String,
 }
 
 impl SourceManager {
-    pub fn new(src: impl Into<String>) -> Self {
-        Self {
+    pub fn new(src: impl Into<String>) -> Arc<Self> {
+        Arc::new(Self {
             file: "<unknown>".into(),
             src: src.into(),
-        }
+        })
     }
 
     /// Opens a source manager for the given path
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Arc<Self>, Error> {
         let file: PathBuf = path.as_ref().to_owned();
         let src = std::fs::read_to_string(&file)?;
 
-        Ok(Self { file, src })
+        Ok(Arc::new(Self { file, src }))
     }
 
-    pub fn new_context<'s>(&'s self) -> Context<'s> {
+    pub fn new_context(self: &Arc<Self>) -> Context {
         Context {
             errors: MutipleErrors::new(),
-            manager: self,
+            manager: Arc::clone(self),
         }
     }
 
@@ -203,15 +335,14 @@ impl From<Span> for SourceSpan {
 
 /// Manages emission of error for a single toml source file.
 /// NOTE: [`Self::finish`] must be called before `Self` is dropped, otherwise
-pub struct Context<'s> {
-    errors: MutipleErrors<'s>,
-    manager: &'s SourceManager,
+pub struct Context {
+    errors: MutipleErrors,
+    manager: Arc<SourceManager>,
 }
 
-impl<'s> Context<'s> {
-
+impl Context {
     fn emitt_span_severity(
-        &self,
+        &mut self,
         span: impl Into<Span>,
         err: impl Into<Error>,
         severity: ErrorSeverity,
@@ -221,7 +352,7 @@ impl<'s> Context<'s> {
         let single = OuterError {
             inner: err,
             span: span.into(),
-            src: self.manager.source(),
+            manager: Arc::clone(&self.manager),
         };
         self.errors.inner.push(single);
         match severity {
@@ -239,17 +370,13 @@ impl<'s> Context<'s> {
     ///
     /// Otherwise, `err` is added to the internal error list and will be emitted when
     /// [`Self::finish`] is called.
-    pub fn emitt_span(
-        &self,
-        span: impl Into<Span>,
-        err: impl Into<Error>,
-    ) -> Result<(), ()> {
+    pub fn emitt_span(&mut self, span: impl Into<Span>, err: impl Into<Error>) -> Result<(), ()> {
         self.emitt_span_severity(span, err, ErrorSeverity::Recoverable)
     }
 
     /// Emitts a fatal error
     pub fn emitt_span_fatal<T>(
-        &self,
+        &mut self,
         span: impl Into<Span>,
         err: impl Into<Error>,
     ) -> Result<T, ()> {
@@ -260,7 +387,7 @@ impl<'s> Context<'s> {
     /// Emitts the error with no span information
     ///
     /// See [`Self::emitt_span`]
-    pub fn emitt(&self, span: impl Into<Span>, err: impl Into<Error>) -> Result<(), ()> {
+    pub fn emitt(&mut self, err: impl Into<Error>) -> Result<(), ()> {
         self.emitt_span(EMPTY_SPAN, err)
     }
 
@@ -269,10 +396,13 @@ impl<'s> Context<'s> {
     /// If any errors have been emitted, returns them inside the Err(...) variant.
     /// Otherwise Ok(())
     /// is returned
-    pub fn finish(mut self) -> Result<(), MutipleErrors<'s>> {
+    pub fn finish(mut self) -> Result<(), MutipleErrors> {
         let result = if !self.errors.inner.is_empty() {
             // Return real errors so that we forget an empty `MutipleErrors` later
-            Err(self.errors.take())
+            let mut errors = self.errors.take();
+            for e in errors.errors_mut() {
+            }
+            Err(errors)
         } else {
             Ok(())
         };
@@ -288,9 +418,11 @@ impl<'s> Context<'s> {
         res: std::result::Result<T, E>,
     ) -> std::result::Result<T, ()> {
         res.map_err(|err| {
-            self.errors
-                .inner
-                .push(OuterError::new(err.into(), (0, 0).into(), ""));
+            self.errors.inner.push(OuterError::new(
+                err.into(),
+                (0, 0).into(),
+                Arc::clone(&self.manager),
+            ));
             ()
         })
     }
@@ -302,7 +434,7 @@ impl<'s> Context<'s> {
     }
 }
 
-impl Drop for Context<'_> {
+impl Drop for Context {
     fn drop(&mut self) {
         panic!("Context dropped without calling finish!");
     }
@@ -322,7 +454,9 @@ mod tests {
     #[test]
     fn basic1() {
         let manager = SourceManager::new("".to_owned());
-        let context = manager.new_context();
-        context.emitt_span((0, 0), Error::NoStates);
+        let mut context = manager.new_context();
+        let _ = context.emitt_span((0, 0), Error::NoStates);
+        let errors = context.finish().unwrap_err();
+        assert_eq!(errors.errors().len(), 1);
     }
 }
