@@ -13,8 +13,10 @@ use serde::{Deserialize, Serialize};
 use std::convert::TryInto;
 use toml::Spanned;
 
-pub fn verify(toml: &str) -> Result<ConfigFile, crate::Error> {
-    Ok(toml::from_str(toml)?)
+use crate::Span;
+
+pub fn verify(toml: &str, context: &mut crate::Context<'_>) -> Result<ConfigFile, ()> {
+    context.check(toml::from_str(toml))
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq)]
@@ -143,74 +145,6 @@ impl Serialize for TomlBool {
     }
 }
 
-impl TryInto<index::Command> for &Command {
-    type Error = crate::Error;
-
-    fn try_into(self) -> Result<index::Command, Self::Error> {
-        let mut count = 0;
-        if self.pyro1.is_some() {
-            count += 1;
-        }
-        if self.pyro2.is_some() {
-            count += 1;
-        }
-        if self.pyro3.is_some() {
-            count += 1;
-        }
-        if self.data_rate.is_some() {
-            count += 1;
-        }
-        if self.becan.is_some() {
-            count += 1;
-        }
-        if count == 0 {
-            // TODO: emit better errors
-            // Zero assignments fond, expected one
-            return Err(crate::Error::Command(crate::CommandError::NoValues));
-        } else if count > 1 {
-            // TODO: emit better errors
-            // More than one assignment found, expected one
-            return Err(crate::Error::Command(crate::CommandError::TooManyValues(
-                count,
-            )));
-        }
-        //The user only set one option, now map that to an object and state
-        let object = {
-            if let Some(pyro1) = &self.pyro1 {
-                CommandObject::Pyro1(pyro1.clone().into_inner().into())
-            } else if let Some(pyro2) = &self.pyro2 {
-                CommandObject::Pyro2(pyro2.clone().into_inner().into())
-            } else if let Some(pyro3) = &self.pyro3 {
-                CommandObject::Pyro3(pyro3.clone().into_inner().into())
-            } else if let Some(data_rate) = &self.data_rate {
-                CommandObject::DataRate(data_rate.clone().into_inner())
-            } else if let Some(becan) = &self.becan {
-                CommandObject::Beacon(becan.clone().into_inner().into())
-            } else {
-                // We return an error if fewer or more than one of the options are set
-                unreachable!()
-            }
-        };
-        Ok(index::Command {
-            object,
-            delay: common::Seconds(
-                self.delay
-                    .as_ref()
-                    .map(|d| d.clone().into_inner())
-                    .unwrap_or(0.0),
-            ),
-        })
-    }
-}
-
-impl TryInto<index::Command> for Command {
-    type Error = crate::Error;
-
-    fn try_into(self) -> Result<index::Command, Self::Error> {
-        (&self).try_into()
-    }
-}
-
 /// Creates a dummy `toml::Spanned` with `value` inside.
 /// Short for create_spanned
 #[cfg(test)]
@@ -233,13 +167,13 @@ pub(crate) fn cs<T>(value: T) -> Spanned<T> {
         value: T,
     }
     let spanned = MySpanned {
-        start: 0,// We dont actually care about these values so use 0
+        start: 0, // We dont actually care about these values so use 0
         end: 0,
         value,
     };
     assert_eq!(
         std::mem::size_of::<MySpanned<T>>(),
-        std::mem::size_of::<Spanned<T>>()
+        std::mem::size_of::<Spanned<T>>(),
     );
     let ptr: *const MySpanned<T> = &spanned;
     let ptr: *const Spanned<T> = ptr as *const _;
@@ -254,7 +188,19 @@ mod tests {
 
     mod config {
 
-        use crate::upper::{cs, verify, Check, ConfigFile, State};
+        use crate::{
+            upper::{cs, verify, Check, ConfigFile, State},
+            SourceManager,
+        };
+
+        fn check_verify(toml: &str, expected: ConfigFile) {
+            let config = SourceManager::new(toml);
+            let context = config.new_context();
+
+            let parsed = verify(toml, &mut context).unwrap();
+            assert_eq!(parsed, expected);
+            context.finish().unwrap(); //Ensure no errors
+        }
 
         #[test]
         fn basic_serialize1() {
@@ -273,9 +219,7 @@ mod tests {
 name = "PowerOn"
 checks = []
 "#;
-
-            let parsed = verify(config).unwrap();
-            assert_eq!(parsed, expected);
+            check_verify(config, expected);
         }
 
         #[test]
@@ -310,8 +254,7 @@ check = "altitude"
 greater_than = 100.0
 "#;
 
-            let parsed = verify(config).unwrap();
-            assert_eq!(parsed, expected);
+            check_verify(config, expected);
         }
     }
 
@@ -353,24 +296,33 @@ greater_than = 100.0
     }
 
     mod command {
-        use crate::upper::{cs, Command, TomlBool};
+        use crate::{
+            upper::{cs, Command, TomlBool},
+            SourceManager,
+        };
         use nova_software_common as common;
         #[test]
         fn a() {
+            let manager = SourceManager::new("");
+            let context = manager.new_context();
             let expected = common::index::Command::new(
                 common::CommandObject::Pyro1(true),
                 common::Seconds(0.0),
             );
 
-            let initial = Command {
+            let initial = cs(Command {
                 pyro1: Some(cs(TomlBool(true))),
                 pyro2: None,
                 pyro3: None,
                 data_rate: None,
                 becan: None,
                 delay: None,
-            };
-            assert_eq!(expected, initial.try_into().unwrap());
+            });
+            assert_eq!(
+                expected,
+                crate::lower::convert_command(&initial, &mut context).unwrap()
+            );
+            context.finish().unwrap();
         }
     }
 }

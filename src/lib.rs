@@ -6,50 +6,23 @@ pub mod upper;
 pub mod error;
 pub use error::*;
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum CommandError {
-    NoValues,
-    TooManyValues(usize),
-}
+pub fn verify(manager: &SourceManager) -> Result<Vec<u8>, MutipleErrors> {
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum StateCountError {
-    NoStates,
-    TooManyStates(usize),
-}
+    let context = manager.new_context();
+    let src = manager.source();
+    let mid = upper::verify(src, &mut context);
+    context.finish()?;
+    let mid = mid.unwrap();
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum CheckConditionError {
-    NoCondition,
-    TooManyConditions(usize),
-}
+    let context = manager.new_context();
+    let lower = lower::verify(mid, &mut context);
+    context.finish()?;
+    let lower = lower.unwrap();
 
-#[derive(thiserror::Error, Debug, PartialEq, Eq)]
-pub enum Error {
-    #[error("toml parse error {0}")]
-    Toml(#[from] toml::de::Error),
+    let context = manager.new_context();
+    let res = postcard::to_stdvec(&lower);
+    let bytes = context.check(res);
+    context.finish()?;
 
-    #[error("postcard error {0}")]
-    Postcard(#[from] postcard::Error),
-
-    #[error("state {0} not found")]
-    StateNotFound(String),
-
-    #[error("wrong number of states: {0:?}")]
-    StateCount(StateCountError),
-
-    #[error("command has wrong number of arguments: {0:?}")]
-    Command(CommandError),
-
-    #[error("check condition wrong: {0:?}")]
-    CheckConditionError(CheckConditionError),
-
-    #[error("no states declared\nconfig files require at least one state")]
-    NoStates,
-}
-
-pub fn verify(toml: &str) -> Result<Vec<u8>, Error> {
-    let mid = upper::verify(toml)?;
-    let lower = lower::verify(mid)?;
-    Ok(postcard::to_stdvec(&lower)?)
+    Ok(bytes.unwrap())
 }

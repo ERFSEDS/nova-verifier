@@ -1,5 +1,4 @@
 default_state = "PowerOn"
-aoseunthaoeusnth
 
 [[states]]
 name = "PowerOn"

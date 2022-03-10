@@ -2,14 +2,14 @@ use std::borrow::Borrow;
 use std::{collections::HashMap, convert::TryInto};
 
 use common::index::{self, StateTransition};
-use common::index::{Check, ConfigFile, State, StateIndex};
+use common::index::{Check, Command, ConfigFile, State, StateIndex};
 use heapless::Vec;
 use toml::Spanned;
 
-use crate::{upper, CheckConditionError, Error, StateCountError};
+use crate::{upper, CheckError, Context, Error, Span, StateCountError};
 use nova_software_common as common;
 
-struct Temp<'s>(HashMap<&'s str, (StateIndex, &'s Spanned<upper::State>)>);
+struct Temp<'s>(HashMap<&'s str, StateIndex>);
 
 impl<'s> Temp<'s> {
     fn new(states: &'s [Spanned<upper::State>]) -> Self {
@@ -22,36 +22,30 @@ impl<'s> Temp<'s> {
 
                     // SAFETY: `i` comes from enumerate, which only yields indices in range
                     let index = unsafe { StateIndex::new_unchecked(i) };
-                    (state.get_ref().name.borrow(), (index, state))
+                    (state.get_ref().name.borrow(), index)
                 })
                 .collect(),
         )
     }
 
-    fn get_index(&self, name: &str) -> Result<StateIndex, Error> {
-        self.0
-            .get(name)
-            .ok_or_else(|| Error::StateNotFound(name.into()))
-            .map(|v| v.0)
-    }
-
-    fn get_span(&self, name: &str) -> Result<&'s Spanned<upper::State>, Error> {
-        self.0
-            .get(name)
-            .ok_or_else(|| Error::StateNotFound(name.into()))
-            .map(|v| v.1.clone())
+    fn get_index(&self, name: &Spanned<String>, context: &Context<'_>) -> Result<StateIndex, ()> {
+        match self.0.get(name.get_ref().as_str()) {
+            Some(v) => Ok(*v),
+            None => context.emitt_span_fatal(name, Error::StateNotFound(name.get_ref().to_owned())),
+        }
     }
 }
 
-//When we go to a low level file, the default state must be first
-pub fn verify(mid: upper::ConfigFile) -> Result<ConfigFile, Error> {
+// When we go to a low level file, the default state must be first
+pub fn verify(mid: upper::ConfigFile, context: &mut crate::Context<'_>) -> Result<ConfigFile, ()> {
     if mid.states.get_ref().is_empty() {
-        return Err(Error::StateCount(StateCountError::NoStates));
+        context.emitt_span(&mid.states, Error::StateCount(StateCountError::NoStates))?;
     }
     if mid.states.get_ref().len() > u8::MAX as usize {
-        return Err(Error::StateCount(StateCountError::TooManyStates(
-            mid.states.get_ref().len(),
-        )));
+        context.emitt_span(
+            &mid.states,
+            Error::StateCount(StateCountError::TooManyStates(mid.states.get_ref().len())),
+        )?;
     }
 
     let temp = Temp::new(mid.states.get_ref().as_slice());
@@ -67,17 +61,17 @@ pub fn verify(mid: upper::ConfigFile) -> Result<ConfigFile, Error> {
     let default_state = mid.default_state.map_or_else(
         // SAFETY: We have checked that there is at least one state above, so index 0 is in bounds
         || Ok(unsafe { StateIndex::new_unchecked(0) }),
-        |name| temp.get_index(name.borrow()),
+        |name| temp.get_index(&name, context),
     )?;
 
     for (src_state, dst_state) in mid.states.get_ref().iter().zip(states.iter_mut()) {
         for src_check in &src_state.get_ref().checks {
-            let check: index::Check = convert_check(src_check.get_ref(), &temp)?;
+            let check: index::Check = convert_check(src_check, &temp, context)?;
             dst_state.checks.push(check).unwrap();
         }
 
         for src_command in &src_state.get_ref().commands {
-            let command: index::Command = src_command.get_ref().try_into().unwrap();
+            let command: index::Command = convert_command(&src_command, context)?;
             dst_state.commands.push(command).unwrap();
         }
     }
@@ -88,7 +82,96 @@ pub fn verify(mid: upper::ConfigFile) -> Result<ConfigFile, Error> {
     })
 }
 
-fn convert_check(check: &upper::Check, temp: &Temp<'_>) -> Result<Check, Error> {
+pub(crate) fn convert_command(
+    command: &Spanned<upper::Command>,
+    context: &mut Context<'_>,
+) -> Result<Command, ()> {
+    let span = command;
+    let command = command.get_ref();
+
+    let mut count = 0;
+    if command.pyro1.is_some() {
+        count += 1;
+    }
+    if command.pyro2.is_some() {
+        count += 1;
+    }
+    if command.pyro3.is_some() {
+        count += 1;
+    }
+    if command.data_rate.is_some() {
+        count += 1;
+    }
+    if command.becan.is_some() {
+        count += 1;
+    }
+    if count == 0 {
+        // TODO: emit better errors
+        // Zero assignments fond, expected one
+        return context
+            .emitt_span_fatal(span, crate::Error::Command(crate::CommandError::NoValues));
+    } else if count > 1 {
+        // More than one assignment found, expected one
+        let mut values: std::vec::Vec<Span> = std::vec::Vec::new();
+        if let Some(s) = command.pyro1 {
+            values.push(s.into());
+        }
+        if let Some(s) = command.pyro2 {
+            values.push(s.into());
+        }
+        if let Some(s) = command.pyro3 {
+            values.push(s.into());
+        }
+        if let Some(s) = command.data_rate {
+            values.push(s.into());
+        }
+        if let Some(s) = command.becan {
+            values.push(s.into());
+        }
+        return context.emitt_span_fatal(
+            span,
+            crate::Error::Command(crate::CommandError::TooManyValues(
+                values.into_iter().map(|v| v.into()).collect(),
+            )),
+        );
+    }
+    use common::CommandObject;
+    //The user only set one option, now map that to an object and state
+    let object = {
+        if let Some(pyro1) = &command.pyro1 {
+            CommandObject::Pyro1(pyro1.clone().into_inner().into())
+        } else if let Some(pyro2) = &command.pyro2 {
+            CommandObject::Pyro2(pyro2.clone().into_inner().into())
+        } else if let Some(pyro3) = &command.pyro3 {
+            CommandObject::Pyro3(pyro3.clone().into_inner().into())
+        } else if let Some(data_rate) = &command.data_rate {
+            CommandObject::DataRate(data_rate.clone().into_inner())
+        } else if let Some(becan) = &command.becan {
+            CommandObject::Beacon(becan.clone().into_inner().into())
+        } else {
+            // We return an error if fewer or more than one of the options are set
+            unreachable!()
+        }
+    };
+    Ok(index::Command {
+        object,
+        delay: common::Seconds(
+            command
+                .delay
+                .as_ref()
+                .map(|d| d.clone().into_inner())
+                .unwrap_or(0.0),
+        ),
+    })
+}
+
+pub(crate) fn convert_check(
+    check: &Spanned<upper::Check>,
+    temp: &Temp<'_>,
+    context: &mut Context<'_>,
+) -> Result<Check, ()> {
+    let span = check;
+    let check = check.get_ref();
     if check.upper_bound.is_some() && check.lower_bound.is_none()
         || check.upper_bound.is_none() && check.lower_bound.is_some()
     {
@@ -107,12 +190,26 @@ fn convert_check(check: &upper::Check, temp: &Temp<'_>) -> Result<Check, Error> 
         count += 1;
     }
     if count == 0 {
-        return Err(Error::CheckConditionError(CheckConditionError::NoCondition));
+        return context.emitt_span_fatal(span, Error::CheckConditionError(CheckError::NoCondition));
     }
     if count > 1 {
-        return Err(Error::CheckConditionError(
-            CheckConditionError::TooManyConditions(count),
-        ));
+        let mut spans: std::vec::Vec<Span> = std::vec::Vec::new();
+        if let Some(gt) = check.greater_than {
+            spans.push(gt.into());
+        }
+        if let (Some(u), Some(l)) = (check.greater_than, check.lower_bound) {
+            spans.push(u.into());
+            spans.push(l.into());
+        }
+        if let Some(flag) = check.flag {
+            spans.push(flag.into());
+        }
+        return context.emitt_span_fatal(
+            span,
+            Error::CheckConditionError(CheckError::TooManyConditions(
+                spans.into_iter().map(|s| s.into()).collect(),
+            )),
+        );
     }
 
     enum CheckKind {
@@ -122,13 +219,20 @@ fn convert_check(check: &upper::Check, temp: &Temp<'_>) -> Result<Check, Error> 
         Pyro2Continuity,
         Pyro3Continuity,
     }
-    let check_kind = match check.check.borrow() {
+    let check_name = check.check.borrow();
+    let check_kind = match check_name {
         "apogee" => CheckKind::Apogee,
         "altitude" => CheckKind::Altitude,
         "pyro1_continuity" => CheckKind::Pyro1Continuity,
         "pyro2_continuity" => CheckKind::Pyro2Continuity,
         "pyro3_continuity" => CheckKind::Pyro3Continuity,
-        other => panic!("Bad check {}", other), // TODO: Better error handling
+        other => {
+            return context.emitt_span_fatal(
+                check.check,
+                Error::Custom(format!("unknown check `{check_name}`")),
+                // TODO: add note (valid values are ...)
+            );
+        }
     };
 
     pub enum CheckCondition {
@@ -152,7 +256,13 @@ fn convert_check(check: &upper::Check, temp: &Temp<'_>) -> Result<Check, Error> 
             match flag.borrow() {
                 "set" => CheckCondition::FlagEq(true),
                 "unset" => CheckCondition::FlagEq(false),
-                _ => panic!("Unknown flag: {}", flag.get_ref()), // TODO: Better error handling
+                _ => {
+                    return context.emitt_span_fatal(
+                        check.check,
+                        Error::Custom(format!("unknown flag `{check_name}`")),
+                        // TODO: add note (valid values are ...)
+                    );
+                }
             }
         } else {
             unreachable!()
@@ -195,12 +305,12 @@ fn convert_check(check: &upper::Check, temp: &Temp<'_>) -> Result<Check, Error> 
     };
 
     let transition = match &check.transition {
-        Some(state) => Some(temp.get_index(state.borrow())?),
+        Some(state) => Some(temp.get_index(state, context)?),
         None => None,
     };
 
     let abort = match &check.abort {
-        Some(state) => Some(temp.get_index(state.borrow())?),
+        Some(state) => Some(temp.get_index(state, context)?),
         None => None,
     };
 
@@ -208,7 +318,15 @@ fn convert_check(check: &upper::Check, temp: &Temp<'_>) -> Result<Check, Error> 
         (Some(t), None) => Some(StateTransition::Transition(t)),
         (None, Some(a)) => Some(StateTransition::Abort(a)),
         (None, None) => None,
-        (Some(_), Some(_)) => panic!("Cannot abort and transition in the same check!"), // TODO: fix
+        (Some(_), Some(_)) => {
+            return context.emitt_span_fatal(
+                check.check,
+                Error::Custom(format!(
+                    "abourt and transition cannot be active in the same check"
+                )),
+                // TODO: Better span
+            );
+        }
     };
 
     Ok(index::Check::new(data, transition))
@@ -218,8 +336,8 @@ fn convert_check(check: &upper::Check, temp: &Temp<'_>) -> Result<Check, Error> 
 mod tests {
     use common::{index::StateIndex, CheckData, FloatCondition, PyroContinuityCondition};
 
-    use crate::{upper, upper::cs, CheckConditionError};
     use super::{common, index};
+    use crate::{upper, upper::cs, CheckError, SourceManager};
 
     #[test]
     fn basic1() {
@@ -259,8 +377,7 @@ mod tests {
             .collect(),
         };
 
-        let real = super::verify(upper).unwrap();
-        assert_eq!(expected, real);
+        check_ok(upper, expected);
     }
 
     #[test]
@@ -330,22 +447,7 @@ mod tests {
             .collect(),
         };
 
-        let real = super::verify(upper).unwrap();
-        assert_eq!(expected, real);
-    }
-
-    fn check_error(err: Result<index::ConfigFile, crate::Error>, expected_err: crate::Error) {
-        match err {
-            Ok(c) => {
-                panic!(
-                    "Low level verify should have failed with: {:?}, decoded to {:?}",
-                    expected_err, c
-                );
-            }
-            Err(e) => {
-                assert_eq!(e, expected_err);
-            }
-        }
+        check_ok(upper, expected);
     }
 
     #[test]
@@ -369,7 +471,7 @@ mod tests {
                 commands: vec![],
             })]),
         };
-        check_error(super::verify(upper), crate::Error::StateNotFound(bad_name));
+        check_error(upper, crate::Error::StateNotFound(bad_name));
     }
 
     #[test]
@@ -393,8 +495,54 @@ mod tests {
             })]),
         };
         check_error(
-            super::verify(upper),
-            crate::Error::CheckConditionError(CheckConditionError::TooManyConditions(3)),
+            upper,
+            crate::Error::CheckConditionError(CheckError::TooManyConditions(Vec::new())),
         );
+    }
+
+    fn check_ok(input: upper::ConfigFile, expected: index::ConfigFile) {
+        let manager = SourceManager::new("".to_owned());
+        let context = manager.new_context();
+        let cfg_file = super::verify(input, &mut context);
+        let errors = context.finish();
+
+        match errors {
+            Err(e) => {
+                panic!("{}", e.to_string());
+            }
+            Ok(()) => {
+                let cfg = cfg_file.unwrap();
+                assert_eq!(expected, cfg);
+            }
+        }
+    }
+
+    fn check_error(input: upper::ConfigFile, expected: crate::Error) {
+        let manager = SourceManager::new("".to_owned());
+        let context = manager.new_context();
+        let cfg_file = super::verify(input, &mut context);
+        let errors = context.finish();
+
+        match errors {
+            Ok(()) => {
+                panic!(
+                    "Low level verify should have failed with: {:?}, decoded to {:?}",
+                    expected,
+                    cfg_file.unwrap()
+                );
+            }
+            Err(e) => {
+                for e in e.errors() {
+                    if e.inner() == &expected {
+                        //Ok we found our error
+                        return;
+                    }
+                }
+                panic!(
+                    "Expected error {expected:?} not triggered.\nGot {}",
+                    e.to_string()
+                );
+            }
+        }
     }
 }
