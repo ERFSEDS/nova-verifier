@@ -1,47 +1,47 @@
-use std::path::{Path, PathBuf};
-use std::rc::Arc;
+use codemap::CodeMap;
+use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel};
 
-enum ErrorSeverity {
-    /// An unrecoverable error. Unrecoverable errors immediately bubble up the call stack
-    Fatal,
-
-    /// An error will eventually be emitted, but we should try to continue to give the user more
-    /// diagnostics
-    Recoverable,
-}
-
-
-pub struct DiagnosticBuilder<'a> {
+#[must_use]
+pub struct DiagnosticBuilder<'s, 'c> {
     diagnostic: Diagnostic,
-    handler: &'a Handler,
+    context: &'c mut Context<'s>,
+    cancelled: bool,
 }
 
-impl<'a> DiagnosticBuilder<'a> {
+impl<'s, 'c> DiagnosticBuilder<'s, 'c> {
     /// For internal use only, creates a new DiagnosticBuilder. For clients, the struct_* methods
     /// on a Session or Handler should be used instead.
-    pub(crate) fn new(handler: &'a Handler, level: Level, message: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        level: Level,
+        message: impl Into<String>,
+        context: &'c mut Context<'s>,
+    ) -> Self {
         let diagnostic = Diagnostic {
             level,
+            code: None,
             message: message.into(),
-            primary: None,
             spans: Vec::new(),
-            children: Vec::new(),
         };
 
         Self {
             diagnostic,
-            handler,
+            cancelled: false,
+            context,
         }
     }
 
     pub fn set_primary_span(&mut self, span: Span) -> &mut Self {
-        self.diagnostic.primary = Some(span);
+        self.diagnostic.spans.push(SpanLabel { span, label: (), style: () }
 
         self
     }
 
     pub fn span_label(&mut self, span: Span, label: impl Into<String>) -> &mut Self {
-        self.diagnostic.spans.push((span, label.into()));
+        self.diagnostic.spans.push(SpanLabel {
+            span,
+            label: label.into(),
+            style: SpanStyle::A,
+        });
 
         self
     }
@@ -76,160 +76,21 @@ impl<'a> DiagnosticBuilder<'a> {
         self.diagnostic.children.push(subd);
 
         self
-    }
-
-    /// Queues this diagnostic to be emitted by the inner Handler/Emitter
-    pub fn emit(&mut self) {
-        if self.diagnostic.level == Level::Warning {
-            self.handler.warn(self.diagnostic.clone());
-        } else {
-            self.handler.error(self.diagnostic.clone());
-        }
-
-        // Mark this as cancelled so that it can be safely dropped
-        self.cancel();
-    }
+    } 
 
     /// Sets this DiagnosticBuilder as cancelled, meaning that it is safe to be dropped
     pub fn cancel(&mut self) {
-        self.diagnostic.level = Level::Cancelled;
+        self.cancelled = true;
     }
 
     /// Returns true if this was cancelled, false otherwise
     pub fn cancelled(&self) -> bool {
-        self.diagnostic.level == Level::Cancelled
+        self.cancelled
     }
 }
 
-
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum StateCountError {
-    NoStates,
-    TooManyStates(usize),
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum CheckError {
-    NoCondition,
-    TooManyConditions(Vec<SourceSpan>),
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum CommandError {
-    NoValues,
-    TooManyValues(Vec<SourceSpan>),
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum Error {
-    #[error("{0}")]
-    Toml(#[from] toml::de::Error),
-
-    #[error("postcard error: {0}")]
-    Postcard(#[from] postcard::Error),
-
-    #[error("state {0} not found")]
-    StateNotFound(String),
-
-    #[error("wrong number of states: {0:?}")]
-    StateCount(StateCountError),
-
-    #[error("command has wrong number of arguments: {0:?}")]
-    Command(CommandError),
-
-    #[error("check condition wrong: {0:?}")]
-    CheckConditionError(CheckError),
-
-    #[error("no states declared\nconfig files require at least one state")]
-    NoStates,
-
-    #[error("{0:?}")]
-    IO(#[from] std::io::Error),
-
-    #[error("{0:?}")]
-    Custom(String),
-}
-
-impl PartialEq for Error {
-    fn eq(&self, other: &Self) -> bool {
-        use Error::*;
-        match (self, other) {
-            (Toml(a), Toml(b)) => a.eq(b),
-            (Postcard(a), Postcard(b)) => a.eq(b),
-            (StateNotFound(a), StateNotFound(b)) => a.eq(b),
-            (StateCount(a), StateCount(b)) => a.eq(b),
-            (Command(a), Command(b)) => a.eq(b),
-            (CheckConditionError(a), CheckConditionError(b)) => a.eq(b),
-            (NoStates, NoStates) => true,
-            (IO(_), IO(_)) => false, // TODO: Find a better way to do this. std::io::Error doesnt support eq
-            (Custom(a), Custom(b)) => a.eq(b),
-            _ => false,
-        }
-    }
-}
-
-#[derive(Diagnostic, Debug, thiserror::Error)]
-#[error("oops")]
-#[diagnostic()]
-pub struct OuterError {
-    inner: Error,
-
-    #[label = "This is the highlight"]
-    span: SourceSpan,
-
-    manager: Arc<SourceManager>,
-}
-
-impl OuterError {
-    pub fn new(inner: Error, span: SourceSpan, manager: Arc<SourceManager>) -> Self {
-        Self {
-            inner,
-            span,
-            manager,
-        }
-    }
-
-    pub fn inner(&self) -> &Error {
-        &self.inner
-    }
-}
-
-#[derive(Diagnostic, Debug, thiserror::Error)]
-#[error("oops2")]
-pub struct MutipleErrors {
-    #[related]
-    inner: Vec<OuterError>,
-}
-
-impl MutipleErrors {
-    pub(crate) fn new() -> Self {
-        Self { inner: Vec::new() }
-    }
-
-    /// Creates a mutiple error collection from a single error with on span
-    pub(crate) fn from_single(error: Error, manager: Arc<SourceManager>) -> Self {
-        Self {
-            inner: vec![OuterError::new(error, EMPTY_SPAN.into(), manager)],
-        }
-    }
-
-    pub(crate) fn take(&mut self) -> Self {
-        let inner = std::mem::take(&mut self.inner);
-        Self { inner }
-    }
-
-    pub fn errors(&self) -> &[OuterError] {
-        &self.inner
-    }
-
-    pub(crate) fn errors_mut(&mut self) -> &mut [OuterError] {
-        &mut self.inner
-    }
-}
-
-/// The top level helper struct for opening and verifing toml files. 
-/// 
+/// The top level helper struct for opening and verifing toml files.
+///
 /// First, open a file with [`Self::open_file`], any errors generated when opening the file will be
 /// saved into this session, and will be available when calling [`Self::end_phase`].
 ///
@@ -240,12 +101,89 @@ impl MutipleErrors {
 /// during that phase. Normal implementations should stop proceding through phases as soon as a
 /// phase completes with errors.
 pub struct Session {
-    inner: codemap::CodeMap,
+    map: codemap::CodeMap,
+    diagnostics: Vec<Diagnostic>,
 }
 
 impl Session {
-    pub fn open_file<'s>(&'s mut self, path: String) -> Result<Context<'s>, ()> {
+    pub fn new() -> Self {
+        Self {
+            map: codemap::CodeMap::new(),
+            diagnostics: Vec::new(),
+        }
+    }
 
+    pub fn open_file<'s>(&'s mut self, path: String) -> Result<Context<'s>, ()> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(v) => {
+                self.diagnostics.push(Diagnostic {
+                    level: Level::Error,
+                    message: format!("Failed to open file `{path}`"),
+                    code: None,
+                    spans: Vec::new(),
+                });
+                return Err(());
+            }
+        };
+        let file = self.map.add_file(path, text);
+        let context = Context {
+            session: self,
+            span: file.span,
+        };
+
+        Ok(context)
+    }
+
+    pub(crate) fn testing<'s>(&'s mut self, toml: &str) -> Context<'s> {
+        let file = self.map.add_file("<anonymous>".to_owned(), toml.to_owned());
+        let context = Context {
+            session: self,
+            span: file.span,
+        };
+
+        context
+    }
+
+    /// Adds a diagnostic to this session.
+    /// Most users should perfer the high level interface via [`DiagnosticBuilder`]
+    pub fn add_diagnostic(&mut self, diagnostic: impl Into<Diagnostic>) {
+        self.diagnostics.push(diagnostic.into());
+    }
+
+    /// Ends the current phase, returning all diagnostics encountered in the process.
+    /// If the current phase has diagnostics that are errors, Err(...) will be returned,
+    /// otherwise Ok(...) will be returned contaiting errors and notes
+    pub fn end_phase<'c>(&'c mut self) -> Result<Diagnostics<'c>, Diagnostics<'c>> {
+        let mut error = false;
+        for d in self.diagnostics {
+            if d.level == Level::Error {
+                error = true;
+                break;
+            }
+        }
+        let result = Diagnostics {
+            diagnostics: std::mem::take(&mut self.diagnostics),
+            codemap: &self.map,
+        };
+        if error {
+            Err(result)
+        } else {
+            Ok(result)
+        }
+    }
+}
+
+pub struct Diagnostics<'c> {
+    diagnostics: Vec<Diagnostic>,
+    codemap: &'c CodeMap,
+}
+
+impl<'c> Diagnostics<'c> {
+    /// Emits all diagnostics to stderr
+    pub fn emit(self) {
+        let mut emitter = Emitter::stderr(ColorConfig::Auto, Some(self.codemap));
+        emitter.emit(&self.diagnostics);
     }
 }
 
@@ -254,84 +192,37 @@ pub struct Context<'s> {
     span: codemap::Span,
 }
 
-/// Manages a single source file
-#[derive(Debug)]
-pub struct SourceManager {
-}
-
-impl SourceManager {
-    pub fn new(src: impl Into<String>) -> Arc<Self> {
-        Arc::new(Self {
-            file: "<unknown>".into(),
-            src: src.into(),
-        })
-    }
-
-    /// Opens a source manager for the given path
-    pub fn open(path: impl AsRef<Path>) -> Result<Arc<Self>, Error> {
-        let file: PathBuf = path.as_ref().to_owned();
-        let src = std::fs::read_to_string(&file)?;
-
-        Ok(Arc::new(Self { file, src }))
-    }
-
-    pub fn new_context(self: &Arc<Self>) -> Context {
-        Context {
-            errors: MutipleErrors::new(),
-            manager: Arc::clone(self),
-        }
-    }
-
-    pub fn source(&self) -> &str {
-        self.src.as_str()
-    }
-}
-
 pub struct Span {
-    start: usize,
-    len: usize,
+    start: u32,
+    end: u32,
 }
-
 const EMPTY_SPAN: Span = Span::new(0, 0);
 
 impl Span {
-    pub const fn new(start: usize, len: usize) -> Self {
-        Self { start, len }
+    pub const fn new(start: u32, end: u32) -> Self {
+        Self { start, end }
     }
 }
 
 impl<T> From<&toml::Spanned<T>> for Span {
     fn from(span: &toml::Spanned<T>) -> Self {
-        Self {
-            start: span.start(),
-            len: span.end() - span.start(),
-        }
+        Self::new(span.start() as u32, span.end() as u32)
     }
 }
 
 impl<T> From<toml::Spanned<T>> for Span {
     fn from(span: toml::Spanned<T>) -> Self {
-        Self {
-            start: span.start(),
-            len: span.end() - span.start(),
-        }
+        Self::new(span.start() as u32, span.end() as u32)
     }
 }
-
+/*
 impl From<(usize, usize)> for Span {
     fn from(span: (usize, usize)) -> Self {
-        Self {
-            start: span.0,
-            len: span.1,
-        }
+        Self::new(span.0, span.1)
+        
     }
 }
-
-impl From<Span> for SourceSpan {
-    fn from(span: Span) -> Self {
-        SourceSpan::new(span.start.into(), span.len.into())
-    }
-}
+*/
 
 /// Manages emission of error for a single toml source file.
 /// NOTE: [`Self::finish`] must be called before `Self` is dropped, otherwise
@@ -400,8 +291,7 @@ impl Context {
         let result = if !self.errors.inner.is_empty() {
             // Return real errors so that we forget an empty `MutipleErrors` later
             let mut errors = self.errors.take();
-            for e in errors.errors_mut() {
-            }
+            for e in errors.errors_mut() {}
             Err(errors)
         } else {
             Ok(())
