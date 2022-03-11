@@ -1,5 +1,5 @@
 use codemap::CodeMap;
-use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel};
+use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 
 #[must_use]
 pub struct DiagnosticBuilder<'s, 'c> {
@@ -30,22 +30,39 @@ impl<'s, 'c> DiagnosticBuilder<'s, 'c> {
         }
     }
 
-    pub fn set_primary_span(&mut self, span: Span) -> &mut Self {
-        self.diagnostic.spans.push(SpanLabel { span, label: (), style: () }
-
-        self
-    }
-
-    pub fn span_label(&mut self, span: Span, label: impl Into<String>) -> &mut Self {
+    pub fn set_primary_span<T: Into<String>>(
+        &mut self,
+        span: impl Into<Span>,
+        message: Option<T>,
+    ) -> &mut Self {
+        let span = span.into();
         self.diagnostic.spans.push(SpanLabel {
-            span,
-            label: label.into(),
-            style: SpanStyle::A,
+            span: self
+                .context
+                .span
+                .subspan(span.start.into(), span.end.into()),
+            label: message.map(|m| m.into()),
+            style: SpanStyle::Primary,
         });
 
         self
     }
 
+    /// Adds an addition label and span to this diagnostic
+    pub fn span_label(&mut self, span: impl Into<Span>, label: impl Into<String>) -> &mut Self {
+        self.diagnostic.spans.push(SpanLabel {
+            span: self
+                .context
+                .span
+                .subspan(span.start.into(), span.end.into()),
+            label: Some(label.into()),
+            style: SpanStyle::Secondary,
+        });
+
+        self
+    }
+
+    /*
     /// Adds a note message to the diagnostic
     pub fn note(&mut self, message: impl Into<String>) -> &mut Self {
         let subd = SubDiagnostic::new(Level::Note, message.into(), None);
@@ -76,7 +93,14 @@ impl<'s, 'c> DiagnosticBuilder<'s, 'c> {
         self.diagnostic.children.push(subd);
 
         self
-    } 
+    }
+    */
+
+    /// Emits this diagnostic to the current session, consuming it
+    pub fn emit(self) {
+        self.context.session.add_diagnostic(self.diagnostic);
+        self.cancel();
+    }
 
     /// Sets this DiagnosticBuilder as cancelled, meaning that it is safe to be dropped
     pub fn cancel(&mut self) {
@@ -86,6 +110,14 @@ impl<'s, 'c> DiagnosticBuilder<'s, 'c> {
     /// Returns true if this was cancelled, false otherwise
     pub fn cancelled(&self) -> bool {
         self.cancelled
+    }
+}
+
+impl<'s, 'c> Drop for DiagnosticBuilder<'s, 'c> {
+    fn drop(&mut self) {
+        if !self.cancelled {
+            panic!("Internal compiler bug. DiagnosticBuilder not emitted!");
+        }
     }
 }
 
@@ -113,20 +145,24 @@ impl Session {
         }
     }
 
-    pub fn open_file<'s>(&'s mut self, path: String) -> Result<Context<'s>, ()> {
-        let text = match std::fs::read_to_string(path) {
+    pub fn open_file<'s>(&'s mut self, file_path: String) -> Result<Context<'s>, ()> {
+        let data = match std::fs::read_to_string(file_path) {
             Ok(t) => t,
             Err(v) => {
                 self.diagnostics.push(Diagnostic {
                     level: Level::Error,
-                    message: format!("Failed to open file `{path}`"),
+                    message: format!("Failed to open file `{file_path}`"),
                     code: None,
                     spans: Vec::new(),
                 });
                 return Err(());
             }
         };
-        let file = self.map.add_file(path, text);
+        self.add_file(data, file_path)
+    }
+
+    pub fn add_file<'s>(&'s mut self, data: String, file_path: String) -> Result<Context<'s>, ()> {
+        let file = self.map.add_file(file_path, data);
         let context = Context {
             session: self,
             span: file.span,
@@ -150,28 +186,6 @@ impl Session {
     pub fn add_diagnostic(&mut self, diagnostic: impl Into<Diagnostic>) {
         self.diagnostics.push(diagnostic.into());
     }
-
-    /// Ends the current phase, returning all diagnostics encountered in the process.
-    /// If the current phase has diagnostics that are errors, Err(...) will be returned,
-    /// otherwise Ok(...) will be returned contaiting errors and notes
-    pub fn end_phase<'c>(&'c mut self) -> Result<Diagnostics<'c>, Diagnostics<'c>> {
-        let mut error = false;
-        for d in self.diagnostics {
-            if d.level == Level::Error {
-                error = true;
-                break;
-            }
-        }
-        let result = Diagnostics {
-            diagnostics: std::mem::take(&mut self.diagnostics),
-            codemap: &self.map,
-        };
-        if error {
-            Err(result)
-        } else {
-            Ok(result)
-        }
-    }
 }
 
 pub struct Diagnostics<'c> {
@@ -187,9 +201,52 @@ impl<'c> Diagnostics<'c> {
     }
 }
 
-pub struct Context<'s> {
-    session: &'s mut Session,
+pub struct Context<'session> {
+    session: &'session mut Session,
     span: codemap::Span,
+}
+
+impl<'session> Context<'session> {
+    pub fn error<'c>(&'c mut self, message: impl Into<String>) -> DiagnosticBuilder<'session, 'c> {
+        DiagnosticBuilder::new(Level::Error, message.into(), self)
+    }
+
+    pub fn warn<'c>(&'c mut self, message: impl Into<String>) -> DiagnosticBuilder<'session, 'c> {
+        DiagnosticBuilder::new(Level::Warning, message.into(), self)
+    }
+
+    pub fn note<'c>(&'c mut self, message: impl Into<String>) -> DiagnosticBuilder<'session, 'c> {
+        DiagnosticBuilder::new(Level::Note, message.into(), self)
+    }
+
+    pub fn help<'c>(&'c mut self, message: impl Into<String>) -> DiagnosticBuilder<'session, 'c> {
+        DiagnosticBuilder::new(Level::Help, message.into(), self)
+    }
+
+    /// Ends the current phase, returning all diagnostics encountered in the process.
+    /// If the current phase has diagnostics that are errors, Err(...) will be returned,
+    /// otherwise Ok(...) will be returned contaiting errors and notes
+    pub fn end_phase<'s>(&'s mut self) -> Result<Diagnostics<'s>, Diagnostics<'s>>
+    where
+        'session: 's,
+    {
+        let mut error = false;
+        for d in self.session.diagnostics {
+            if d.level == Level::Error {
+                error = true;
+                break;
+            }
+        }
+        let result = Diagnostics {
+            diagnostics: std::mem::take(&mut self.session.diagnostics),
+            codemap: &self.session.map,
+        };
+        if error {
+            Err(result)
+        } else {
+            Ok(result)
+        }
+    }
 }
 
 pub struct Span {
@@ -219,116 +276,10 @@ impl<T> From<toml::Spanned<T>> for Span {
 impl From<(usize, usize)> for Span {
     fn from(span: (usize, usize)) -> Self {
         Self::new(span.0, span.1)
-        
+
     }
 }
 */
-
-/// Manages emission of error for a single toml source file.
-/// NOTE: [`Self::finish`] must be called before `Self` is dropped, otherwise
-pub struct Context {
-    errors: MutipleErrors,
-    manager: Arc<SourceManager>,
-}
-
-impl Context {
-    fn emitt_span_severity(
-        &mut self,
-        span: impl Into<Span>,
-        err: impl Into<Error>,
-        severity: ErrorSeverity,
-    ) -> Result<(), ()> {
-        let err = err.into();
-        let span = span.into();
-        let single = OuterError {
-            inner: err,
-            span: span.into(),
-            manager: Arc::clone(&self.manager),
-        };
-        self.errors.inner.push(single);
-        match severity {
-            ErrorSeverity::Recoverable => Ok(()),
-            ErrorSeverity::Fatal => Err(()),
-        }
-    }
-
-    /// Emitts a span with a given error.
-    ///
-    /// TODO: Fix docs
-    /// Callers should always use the question mark on the result.
-    /// This is because if `err` is a critical error that forces verification to stop,
-    /// this function will return an Err(()).
-    ///
-    /// Otherwise, `err` is added to the internal error list and will be emitted when
-    /// [`Self::finish`] is called.
-    pub fn emitt_span(&mut self, span: impl Into<Span>, err: impl Into<Error>) -> Result<(), ()> {
-        self.emitt_span_severity(span, err, ErrorSeverity::Recoverable)
-    }
-
-    /// Emitts a fatal error
-    pub fn emitt_span_fatal<T>(
-        &mut self,
-        span: impl Into<Span>,
-        err: impl Into<Error>,
-    ) -> Result<T, ()> {
-        self.emitt_span_severity(span, err, ErrorSeverity::Fatal)
-            .map(|_| unreachable!())
-    }
-
-    /// Emitts the error with no span information
-    ///
-    /// See [`Self::emitt_span`]
-    pub fn emitt(&mut self, err: impl Into<Error>) -> Result<(), ()> {
-        self.emitt_span(EMPTY_SPAN, err)
-    }
-
-    /// Cleans up this context and prepares for displaying error.
-    ///
-    /// If any errors have been emitted, returns them inside the Err(...) variant.
-    /// Otherwise Ok(())
-    /// is returned
-    pub fn finish(mut self) -> Result<(), MutipleErrors> {
-        let result = if !self.errors.inner.is_empty() {
-            // Return real errors so that we forget an empty `MutipleErrors` later
-            let mut errors = self.errors.take();
-            for e in errors.errors_mut() {}
-            Err(errors)
-        } else {
-            Ok(())
-        };
-        // Prevent triggering debugging panic
-        std::mem::forget(self);
-        result
-    }
-
-    /// Checks that a result is not an error. If `res` is an error, it will be emmitted with no
-    /// span or source information
-    pub fn check<T, E: Into<Error>>(
-        &mut self,
-        res: std::result::Result<T, E>,
-    ) -> std::result::Result<T, ()> {
-        res.map_err(|err| {
-            self.errors.inner.push(OuterError::new(
-                err.into(),
-                (0, 0).into(),
-                Arc::clone(&self.manager),
-            ));
-            ()
-        })
-    }
-
-    pub fn unreachable(&self) -> ! {
-        let s = self.errors.to_string();
-        eprintln!("{}", s);
-        panic!("FATAL ERROR: Verifier entered unreachable code!");
-    }
-}
-
-impl Drop for Context {
-    fn drop(&mut self) {
-        panic!("Context dropped without calling finish!");
-    }
-}
 
 #[cfg(test)]
 mod tests {

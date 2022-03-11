@@ -6,7 +6,7 @@ use common::index::{Check, Command, ConfigFile, State, StateIndex};
 use heapless::Vec;
 use toml::Spanned;
 
-use crate::{upper, CheckError, Context, Error, Span, StateCountError};
+use crate::{upper, Context, Span};
 use nova_software_common as common;
 
 pub(crate) struct Temp<'s>(HashMap<&'s str, StateIndex>);
@@ -31,7 +31,13 @@ impl<'s> Temp<'s> {
     fn get_index(&self, name: &Spanned<String>, context: &mut Context) -> Result<StateIndex, ()> {
         match self.0.get(name.get_ref().as_str()) {
             Some(v) => Ok(*v),
-            None => context.emitt_span_fatal(name, Error::StateNotFound(name.get_ref().to_owned())),
+            None => {
+                context
+                    .error(format!("state not found `{}`", name.get_ref()))
+                    .set_primary_span(name, format!("not found").into())
+                    .emit();
+                Err(())
+            }
         }
     }
 }
@@ -39,13 +45,23 @@ impl<'s> Temp<'s> {
 // When we go to a low level file, the default state must be first
 pub fn verify(mid: upper::ConfigFile, context: &mut crate::Context) -> Result<ConfigFile, ()> {
     if mid.states.get_ref().is_empty() {
-        context.emitt_span(&mid.states, Error::StateCount(StateCountError::NoStates))?;
+        context
+            .error(format!("states missing"))
+            .set_primary_span(mid.states, Some("you need to have at least one state"));
+        return Err(());
     }
-    if mid.states.get_ref().len() > u8::MAX as usize {
-        context.emitt_span(
-            &mid.states,
-            Error::StateCount(StateCountError::TooManyStates(mid.states.get_ref().len())),
-        )?;
+    if mid.states.get_ref().len() > common::MAX_STATES as usize {
+        context
+            .error(format!("too many states"))
+            .set_primary_span(
+                mid.states,
+                Some(format!(
+                    "the maxinum number of states is {}",
+                    common::MAX_STATES
+                )),
+            )
+            .emit();
+        return Err(());
     }
 
     let temp = Temp::new(mid.states.get_ref().as_slice());
@@ -108,8 +124,10 @@ pub(crate) fn convert_command(
     if count == 0 {
         // TODO: emit better errors
         // Zero assignments fond, expected one
-        return context
-            .emitt_span_fatal(span, crate::Error::Command(crate::CommandError::NoValues));
+        context
+            .error(format!("command action missing"))
+            .set_primary_span(span, Some("you must specify one command action"))
+            .emit();
     } else if count > 1 {
         // More than one assignment found, expected one
         let mut values: std::vec::Vec<Span> = std::vec::Vec::new();
@@ -128,12 +146,21 @@ pub(crate) fn convert_command(
         if let Some(s) = &command.becan {
             values.push(s.into());
         }
-        return context.emitt_span_fatal(
-            span,
-            crate::Error::Command(crate::CommandError::TooManyValues(
-                values.into_iter().map(|v| v.into()).collect(),
-            )),
-        );
+
+        let mut err = context
+            .error(format!("too many command actions"))
+            .set_primary_span(
+                span,
+                Some(format!(
+                    "you must specify exactly one command action, not {}",
+                    values.len()
+                )),
+            );
+
+        for span in values {
+            err.span_label(span, "declared here");
+        }
+        err.emit();
     }
     use common::CommandObject;
     //The user only set one option, now map that to an object and state
@@ -190,7 +217,10 @@ pub(crate) fn convert_check(
         count += 1;
     }
     if count == 0 {
-        return context.emitt_span_fatal(span, Error::CheckConditionError(CheckError::NoCondition));
+        context
+            .error(format!("too many check conditions"))
+            .set_primary_span(span, Some("you must specify one check condition per check"))
+            .emit();
     }
     if count > 1 {
         let mut spans: std::vec::Vec<Span> = std::vec::Vec::new();
@@ -204,12 +234,21 @@ pub(crate) fn convert_check(
         if let Some(flag) = &check.flag {
             spans.push(flag.into());
         }
-        return context.emitt_span_fatal(
-            span,
-            Error::CheckConditionError(CheckError::TooManyConditions(
-                spans.into_iter().map(|s| s.into()).collect(),
-            )),
-        );
+
+        let mut err = context
+            .error(format!("too many command actions"))
+            .set_primary_span(
+                span,
+                Some(format!(
+                    "you must specify exactly one check condition, not {}",
+                    spans.len()
+                )),
+            );
+
+        for span in spans {
+            err.span_label(span, "declared here");
+        }
+        err.emit();
     }
 
     enum CheckKind {
@@ -227,11 +266,12 @@ pub(crate) fn convert_check(
         "pyro2_continuity" => CheckKind::Pyro2Continuity,
         "pyro3_continuity" => CheckKind::Pyro3Continuity,
         _ => {
-            return context.emitt_span_fatal(
-                &check.check,
-                Error::Custom(format!("unknown check `{check_name}`")),
-                // TODO: add note (valid values are ...)
-            );
+            context
+                .error(format!("unknown check `{check_name}`"))
+                .set_primary_span(span, None)
+                .emit();
+
+            return Err(());
         }
     };
 
@@ -257,11 +297,11 @@ pub(crate) fn convert_check(
                 "set" => CheckCondition::FlagEq(true),
                 "unset" => CheckCondition::FlagEq(false),
                 _ => {
-                    return context.emitt_span_fatal(
-                        &check.check,
-                        Error::Custom(format!("unknown flag `{check_name}`")),
-                        // TODO: add note (valid values are ...)
-                    );
+                    context
+                        .error(format!("unknown flag `{check_name}`"))
+                        .set_primary_span(flag, None)
+                        .emit();
+                    return Err(());
                 }
             }
         } else {
@@ -305,27 +345,29 @@ pub(crate) fn convert_check(
     };
 
     let transition = match &check.transition {
-        Some(state) => Some(temp.get_index(state, context)?),
+        Some(state) => Some((temp.get_index(state, context)?, state)),
         None => None,
     };
 
     let abort = match &check.abort {
-        Some(state) => Some(temp.get_index(state, context)?),
+        Some(state) => Some((temp.get_index(state, context)?, state)),
         None => None,
     };
 
     let transition = match (transition, abort) {
-        (Some(t), None) => Some(StateTransition::Transition(t)),
-        (None, Some(a)) => Some(StateTransition::Abort(a)),
+        (Some(t), None) => Some(StateTransition::Transition(t.0)),
+        (None, Some(a)) => Some(StateTransition::Abort(a.0)),
         (None, None) => None,
-        (Some(_), Some(_)) => {
-            return context.emitt_span_fatal(
-                &check.check,
-                Error::Custom(format!(
-                    "abourt and transition cannot be active in the same check"
-                )),
-                // TODO: Better span
-            );
+        (Some(t), Some(a)) => {
+            context
+                .error(format!(
+                    "abort and transition cannot be active in the same check"
+                ))
+                .set_primary_span(t.1, None)
+                .span_label(a.1, format!("second action declared here"))
+                .emit();
+
+            return Err(());
         }
     };
 
@@ -337,7 +379,7 @@ mod tests {
     use common::{index::StateIndex, CheckData, FloatCondition, PyroContinuityCondition};
 
     use super::{common, index};
-    use crate::{upper, upper::cs, CheckError, SourceManager};
+    use crate::{upper, upper::cs, CheckError, Session, SourceManager};
 
     #[test]
     fn basic1() {
@@ -471,7 +513,7 @@ mod tests {
                 commands: vec![],
             })]),
         };
-        check_error(upper, crate::Error::StateNotFound(bad_name));
+        check_error(upper);
     }
 
     #[test]
@@ -494,54 +536,44 @@ mod tests {
                 commands: vec![],
             })]),
         };
-        check_error(
-            upper,
-            crate::Error::CheckConditionError(CheckError::TooManyConditions(Vec::new())),
-        );
+        check_error(upper);
     }
 
     fn check_ok(input: upper::ConfigFile, expected: index::ConfigFile) {
-        let manager = SourceManager::new("".to_owned());
-        let mut context = manager.new_context();
+        let session = Session::new();
+        let context = session.testing("");
         let cfg_file = super::verify(input, &mut context);
-        let errors = context.finish();
+        let errors = context.end_phase();
 
         match errors {
-            Err(e) => {
-                panic!("{}", e.to_string());
+            Ok(d) => {
+                d.emit();
+                panic!("Good");
             }
-            Ok(()) => {
-                let cfg = cfg_file.unwrap();
-                assert_eq!(expected, cfg);
+            Err(d) => {
+                d.emit();
+                panic!("Low level verify failed");
             }
         }
     }
 
-    fn check_error(input: upper::ConfigFile, expected: crate::Error) {
-        let manager = SourceManager::new("".to_owned());
-        let mut context = manager.new_context();
+    fn check_error(input: upper::ConfigFile) {
+        let session = Session::new();
+        let context = session.testing("");
         let cfg_file = super::verify(input, &mut context);
-        let errors = context.finish();
+        let errors = context.end_phase();
 
         match errors {
-            Ok(()) => {
+            Ok(d) => {
+                d.emit();
                 panic!(
-                    "Low level verify should have failed with: {:?}, decoded to {:?}",
-                    expected,
+                    "Low level verify should have failed, decoded to {:?}",
                     cfg_file.unwrap()
                 );
             }
-            Err(e) => {
-                for e in e.errors() {
-                    if e.inner() == &expected {
-                        //Ok we found our error
-                        return;
-                    }
-                }
-                panic!(
-                    "Expected error {expected:?} not triggered.\nGot {}",
-                    e.to_string()
-                );
+            Err(d) => {
+                d.emit();
+                panic!("Good");
             }
         }
     }

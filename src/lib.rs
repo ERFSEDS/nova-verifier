@@ -4,24 +4,26 @@
 pub mod error;
 pub mod lower;
 pub mod upper;
+
 pub use error::*;
 
-pub fn verify(manager: Arc<SourceManager>) -> Result<Vec<u8>, MutipleErrors> {
-    let mut context = manager.new_context();
-    let src = manager.source();
-    let mid = upper::verify(src, &mut context);
-    context.finish()?;
+pub fn verify<'session>(
+    session: &'session mut Session,
+    toml: String,
+    file_path: String,
+) -> Result<(Vec<u8>, Diagnostics<'session>), Diagnostics<'session>> {
+    let mut context = session.add_file(toml, file_path).unwrap();
+    let mid = upper::verify(&toml, &mut context);
+    context.end_phase()?;
     let mid = mid.unwrap();
 
-    let mut context = manager.new_context();
     let lower = lower::verify(mid, &mut context);
-    context.finish()?;
+    context.end_phase()?;
     let lower = lower.unwrap();
 
-    let mut context = manager.new_context();
-    let res = postcard::to_stdvec(&lower);
-    let bytes = context.check(res);
-    context.finish()?;
+    let bytes = postcard::to_stdvec(&lower);
+    context.end_phase()?;
+    let bytes = bytes.unwrap();
 
-    Ok(bytes.unwrap())
+    Ok(bytes)
 }
