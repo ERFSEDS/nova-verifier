@@ -16,7 +16,17 @@ use toml::Spanned;
 use crate::Span;
 
 pub fn verify(toml: &str, context: &mut crate::Context) -> Result<ConfigFile, ()> {
-    context.check(toml::from_str(toml))
+    match toml::from_str(toml) {
+        Ok(c) => Ok(c),
+        Err(e) => {
+            let span = e.line_col().unwrap_or((0, 0));
+            context
+                .error("failed to parse config file")
+                .set_primary_span(span, e.to_string())
+                .emit();
+            Err(())
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq)]
@@ -190,16 +200,16 @@ mod tests {
 
         use crate::{
             upper::{cs, verify, Check, ConfigFile, State},
-            SourceManager,
+            Session,
         };
 
         fn check_verify(toml: &str, expected: ConfigFile) {
-            let config = SourceManager::new(toml);
-            let mut context = config.new_context();
+            let session = Session::new();
+            let context = session.testing(toml);
 
-            let parsed = verify(toml, &mut context).unwrap();
-            assert_eq!(parsed, expected);
-            context.finish().unwrap(); //Ensure no errors
+            let parsed = verify(toml, &mut context);
+            context.end_phase_and_emit().unwrap();
+            assert_eq!(parsed.unwrap(), expected);
         }
 
         #[test]
@@ -298,13 +308,14 @@ greater_than = 100.0
     mod command {
         use crate::{
             upper::{cs, Command, TomlBool},
-            SourceManager,
+            Session,
         };
         use nova_software_common as common;
         #[test]
         fn a() {
-            let manager = SourceManager::new("");
-            let mut context = manager.new_context();
+            let session = Session::new();
+            let context = session.testing("");
+
             let expected = common::index::Command::new(
                 common::CommandObject::Pyro1(true),
                 common::Seconds(0.0),
@@ -322,7 +333,8 @@ greater_than = 100.0
                 expected,
                 crate::lower::convert_command(&initial, &mut context).unwrap()
             );
-            context.finish().unwrap();
+
+            context.end_phase_and_emit().unwrap();
         }
     }
 }

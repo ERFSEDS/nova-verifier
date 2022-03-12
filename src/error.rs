@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use codemap::CodeMap;
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
 
@@ -30,18 +32,32 @@ impl<'s, 'c> DiagnosticBuilder<'s, 'c> {
         }
     }
 
-    pub fn set_primary_span<T: Into<String>>(
+    pub fn set_primary_span_no_msg<T: Into<String>>(&mut self, span: impl Into<Span>) -> &mut Self {
+        let span = span.into();
+        self.diagnostic.spans.push(SpanLabel {
+            span: self
+                .context
+                .span()
+                .subspan(span.start.into(), span.end.into()),
+            label: None,
+            style: SpanStyle::Primary,
+        });
+
+        self
+    }
+
+    pub fn set_primary_span(
         &mut self,
         span: impl Into<Span>,
-        message: Option<T>,
+        message: impl Into<String>,
     ) -> &mut Self {
         let span = span.into();
         self.diagnostic.spans.push(SpanLabel {
             span: self
                 .context
-                .span
+                .span()
                 .subspan(span.start.into(), span.end.into()),
-            label: message.map(|m| m.into()),
+            label: Some(message.into()),
             style: SpanStyle::Primary,
         });
 
@@ -50,12 +66,27 @@ impl<'s, 'c> DiagnosticBuilder<'s, 'c> {
 
     /// Adds an addition label and span to this diagnostic
     pub fn span_label(&mut self, span: impl Into<Span>, label: impl Into<String>) -> &mut Self {
+        let span = span.into();
         self.diagnostic.spans.push(SpanLabel {
             span: self
                 .context
-                .span
+                .span()
                 .subspan(span.start.into(), span.end.into()),
             label: Some(label.into()),
+            style: SpanStyle::Secondary,
+        });
+
+        self
+    }
+
+    pub fn add_span(&mut self, span: impl Into<Span>) -> &mut Self {
+        let span = span.into();
+        self.diagnostic.spans.push(SpanLabel {
+            span: self
+                .context
+                .span()
+                .subspan(span.start.into(), span.end.into()),
+            label: None,
             style: SpanStyle::Secondary,
         });
 
@@ -165,7 +196,7 @@ impl Session {
         let file = self.map.add_file(file_path, data);
         let context = Context {
             session: self,
-            span: file.span,
+            file,
         };
 
         Ok(context)
@@ -175,7 +206,7 @@ impl Session {
         let file = self.map.add_file("<anonymous>".to_owned(), toml.to_owned());
         let context = Context {
             session: self,
-            span: file.span,
+            file,
         };
 
         context
@@ -199,11 +230,18 @@ impl<'c> Diagnostics<'c> {
         let mut emitter = Emitter::stderr(ColorConfig::Auto, Some(self.codemap));
         emitter.emit(&self.diagnostics);
     }
+
+    /// Emits all diagnostics to stderr, and appends them to `to_add`
+    pub fn emit_and_extend(self, to_add: &mut Vec<Diagnostic>) {
+        let mut emitter = Emitter::stderr(ColorConfig::Auto, Some(self.codemap));
+        emitter.emit(&self.diagnostics);
+        to_add.extend(self.diagnostics);
+    }
 }
 
 pub struct Context<'session> {
     session: &'session mut Session,
-    span: codemap::Span,
+    file: Arc<codemap::File>,
 }
 
 impl<'session> Context<'session> {
@@ -223,6 +261,20 @@ impl<'session> Context<'session> {
         DiagnosticBuilder::new(Level::Help, message.into(), self)
     }
 
+    /// Returns true if this phase contains errors
+    pub fn has_error(&self) -> bool {
+        for d in self.session.diagnostics {
+            if d.level == Level::Error {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn span(&self) -> codemap::Span {
+        self.file.span
+    }
+
     /// Ends the current phase, returning all diagnostics encountered in the process.
     /// If the current phase has diagnostics that are errors, Err(...) will be returned,
     /// otherwise Ok(...) will be returned contaiting errors and notes
@@ -230,13 +282,7 @@ impl<'session> Context<'session> {
     where
         'session: 's,
     {
-        let mut error = false;
-        for d in self.session.diagnostics {
-            if d.level == Level::Error {
-                error = true;
-                break;
-            }
-        }
+        let error = self.has_error();
         let result = Diagnostics {
             diagnostics: std::mem::take(&mut self.session.diagnostics),
             codemap: &self.session.map,
@@ -247,17 +293,41 @@ impl<'session> Context<'session> {
             Ok(result)
         }
     }
+
+    /// Ends the current phase, emitting all diagnostics, and returning them as a Vector.
+    /// The value within the `Result` is the same, but Err(...) is used to convey that the current
+    /// phase failed.
+    pub fn end_phase_and_emit(&mut self) -> Result<Vec<Diagnostic>, Vec<Diagnostic>> {
+        let mut vec = Vec::new();
+        match self.end_phase() {
+            Ok(d) => {
+                d.emit_and_extend(&mut vec);
+                Ok(vec)
+            }
+            Err(d) => {
+                d.emit_and_extend(&mut vec);
+                Err(vec)
+            }
+        }
+    }
+
+    /// Returns a span representing a single character at 0 indexed `(row, col)` in the current
+    /// file
+    pub fn row_col_to_span(&self, row_col: (usize, usize)) -> Span {
+        let line_num = row_col.0;
+        let col_num = row_col.1;
+        let line = self.file.line_span(line_num);
+        let span = line.subspan(col_num as u64, col_num as u64 + 1);
+        Span::new(span.low(), span.high());
+    }
 }
 
-pub struct Span {
-    start: u32,
-    end: u32,
-}
+pub struct Span(codemap::Span);
 const EMPTY_SPAN: Span = Span::new(0, 0);
 
 impl Span {
     pub const fn new(start: u32, end: u32) -> Self {
-        Self { start, end }
+        codemap::Span
     }
 }
 

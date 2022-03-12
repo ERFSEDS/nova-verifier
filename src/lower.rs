@@ -34,7 +34,7 @@ impl<'s> Temp<'s> {
             None => {
                 context
                     .error(format!("state not found `{}`", name.get_ref()))
-                    .set_primary_span(name, format!("not found").into())
+                    .set_primary_span(name, format!("not found"))
                     .emit();
                 Err(())
             }
@@ -47,18 +47,15 @@ pub fn verify(mid: upper::ConfigFile, context: &mut crate::Context) -> Result<Co
     if mid.states.get_ref().is_empty() {
         context
             .error(format!("states missing"))
-            .set_primary_span(mid.states, Some("you need to have at least one state"));
+            .set_primary_span(&mid.states, "you need to have at least one state");
         return Err(());
     }
     if mid.states.get_ref().len() > common::MAX_STATES as usize {
         context
             .error(format!("too many states"))
             .set_primary_span(
-                mid.states,
-                Some(format!(
-                    "the maxinum number of states is {}",
-                    common::MAX_STATES
-                )),
+                &mid.states,
+                format!("the maxinum number of states is {}", common::MAX_STATES),
             )
             .emit();
         return Err(());
@@ -126,7 +123,7 @@ pub(crate) fn convert_command(
         // Zero assignments fond, expected one
         context
             .error(format!("command action missing"))
-            .set_primary_span(span, Some("you must specify one command action"))
+            .set_primary_span(span, "you must specify one command action")
             .emit();
     } else if count > 1 {
         // More than one assignment found, expected one
@@ -151,10 +148,10 @@ pub(crate) fn convert_command(
             .error(format!("too many command actions"))
             .set_primary_span(
                 span,
-                Some(format!(
+                format!(
                     "you must specify exactly one command action, not {}",
                     values.len()
-                )),
+                ),
             );
 
         for span in values {
@@ -197,7 +194,7 @@ pub(crate) fn convert_check(
     temp: &Temp<'_>,
     context: &mut Context,
 ) -> Result<Check, ()> {
-    let span = check;
+    let full_span = check;
     let check = check.get_ref();
     if check.upper_bound.is_some() && check.lower_bound.is_none()
         || check.upper_bound.is_none() && check.lower_bound.is_some()
@@ -219,7 +216,7 @@ pub(crate) fn convert_check(
     if count == 0 {
         context
             .error(format!("too many check conditions"))
-            .set_primary_span(span, Some("you must specify one check condition per check"))
+            .set_primary_span(full_span, "you must specify one check condition per check")
             .emit();
     }
     if count > 1 {
@@ -238,7 +235,7 @@ pub(crate) fn convert_check(
         let mut err = context
             .error(format!("too many command actions"))
             .set_primary_span(
-                span,
+                full_span,
                 Some(format!(
                     "you must specify exactly one check condition, not {}",
                     spans.len()
@@ -267,8 +264,13 @@ pub(crate) fn convert_check(
         "pyro3_continuity" => CheckKind::Pyro3Continuity,
         _ => {
             context
-                .error(format!("unknown check `{check_name}`"))
-                .set_primary_span(span, None)
+                .error(format!("no check with name `{check_name}` exists"))
+                .set_primary_span(full_span, format!("unknown check `{check_name}`"))
+                .emit();
+
+            context
+                .help("try `apogee`, or `altitude`, or `pyroX_continuity`")
+                .set_primary_span_no_msg(full_span)
                 .emit();
 
             return Err(());
@@ -298,8 +300,8 @@ pub(crate) fn convert_check(
                 "unset" => CheckCondition::FlagEq(false),
                 _ => {
                     context
-                        .error(format!("unknown flag `{check_name}`"))
-                        .set_primary_span(flag, None)
+                        .error(format!("flag values must be `set` or `unset`"))
+                        .set_primary_span(flag, format!("unknown flag value `{check_name}`"))
                         .emit();
                     return Err(());
                 }
@@ -359,14 +361,23 @@ pub(crate) fn convert_check(
         (None, Some(a)) => Some(StateTransition::Abort(a.0)),
         (None, None) => None,
         (Some(t), Some(a)) => {
+            if t.1.start() > a.1.start() {
+                // swap a and t so that t is always first
+                std::mem::swap(&mut t, &mut a);
+            }
             context
                 .error(format!(
                     "abort and transition cannot be active in the same check"
                 ))
-                .set_primary_span(t.1, None)
+                .set_primary_span_no_msg(t.1)
                 .span_label(a.1, format!("second action declared here"))
                 .emit();
 
+            context
+                .help(format!("remove either `abort` or `transition`"))
+                .add_span(a.1)
+                .add_span(t.1)
+                .emit();
             return Err(());
         }
     };
@@ -379,7 +390,7 @@ mod tests {
     use common::{index::StateIndex, CheckData, FloatCondition, PyroContinuityCondition};
 
     use super::{common, index};
-    use crate::{upper, upper::cs, CheckError, Session, SourceManager};
+    use crate::{upper, upper::cs, Session};
 
     #[test]
     fn basic1() {
