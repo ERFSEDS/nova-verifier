@@ -32,13 +32,9 @@ impl<'s, 'c> DiagnosticBuilder<'s, 'c> {
         }
     }
 
-    pub fn set_primary_span_no_msg<T: Into<String>>(&mut self, span: impl Into<Span>) -> &mut Self {
-        let span = span.into();
+    pub fn set_primary_span_no_msg(mut self, span: impl Into<Span>) -> Self {
         self.diagnostic.spans.push(SpanLabel {
-            span: self
-                .context
-                .span()
-                .subspan(span.start.into(), span.end.into()),
+            span: span.into().0,
             label: None,
             style: SpanStyle::Primary,
         });
@@ -46,17 +42,9 @@ impl<'s, 'c> DiagnosticBuilder<'s, 'c> {
         self
     }
 
-    pub fn set_primary_span(
-        &mut self,
-        span: impl Into<Span>,
-        message: impl Into<String>,
-    ) -> &mut Self {
-        let span = span.into();
+    pub fn set_primary_span(mut self, span: impl Into<Span>, message: impl Into<String>) -> Self {
         self.diagnostic.spans.push(SpanLabel {
-            span: self
-                .context
-                .span()
-                .subspan(span.start.into(), span.end.into()),
+            span: span.into().0,
             label: Some(message.into()),
             style: SpanStyle::Primary,
         });
@@ -65,13 +53,10 @@ impl<'s, 'c> DiagnosticBuilder<'s, 'c> {
     }
 
     /// Adds an addition label and span to this diagnostic
-    pub fn span_label(&mut self, span: impl Into<Span>, label: impl Into<String>) -> &mut Self {
+    pub fn span_label(mut self, span: impl Into<Span>, label: impl Into<String>) -> Self {
         let span = span.into();
         self.diagnostic.spans.push(SpanLabel {
-            span: self
-                .context
-                .span()
-                .subspan(span.start.into(), span.end.into()),
+            span: span.0,
             label: Some(label.into()),
             style: SpanStyle::Secondary,
         });
@@ -79,13 +64,10 @@ impl<'s, 'c> DiagnosticBuilder<'s, 'c> {
         self
     }
 
-    pub fn add_span(&mut self, span: impl Into<Span>) -> &mut Self {
+    pub fn add_span(mut self, span: impl Into<Span>) -> Self {
         let span = span.into();
         self.diagnostic.spans.push(SpanLabel {
-            span: self
-                .context
-                .span()
-                .subspan(span.start.into(), span.end.into()),
+            span: span.0,
             label: None,
             style: SpanStyle::Secondary,
         });
@@ -128,8 +110,15 @@ impl<'s, 'c> DiagnosticBuilder<'s, 'c> {
     */
 
     /// Emits this diagnostic to the current session, consuming it
-    pub fn emit(self) {
-        self.context.session.add_diagnostic(self.diagnostic);
+    pub fn emit(mut self) {
+        let empty = Diagnostic {
+            level: Level::Bug,
+            message: String::new(),
+            code: None,
+            spans: Vec::new(),
+        };
+        let diagnostic = std::mem::replace(&mut self.diagnostic, empty);
+        self.context.session.add_diagnostic(diagnostic);
         self.cancel();
     }
 
@@ -177,7 +166,7 @@ impl Session {
     }
 
     pub fn open_file<'s>(&'s mut self, file_path: String) -> Result<Context<'s>, ()> {
-        let data = match std::fs::read_to_string(file_path) {
+        let data = match std::fs::read_to_string(&file_path) {
             Ok(t) => t,
             Err(v) => {
                 self.diagnostics.push(Diagnostic {
@@ -263,7 +252,7 @@ impl<'session> Context<'session> {
 
     /// Returns true if this phase contains errors
     pub fn has_error(&self) -> bool {
-        for d in self.session.diagnostics {
+        for d in &self.session.diagnostics {
             if d.level == Level::Error {
                 return true;
             }
@@ -273,6 +262,10 @@ impl<'session> Context<'session> {
 
     pub fn span(&self) -> codemap::Span {
         self.file.span
+    }
+
+    pub fn source(&self) -> &str {
+        self.file.source()
     }
 
     /// Ends the current phase, returning all diagnostics encountered in the process.
@@ -318,30 +311,30 @@ impl<'session> Context<'session> {
         let col_num = row_col.1;
         let line = self.file.line_span(line_num);
         let span = line.subspan(col_num as u64, col_num as u64 + 1);
-        Span::new(span.low(), span.high());
+        span.into()
     }
 }
 
+#[derive(Copy, Clone, Hash, Eq, PartialEq, Debug)]
 pub struct Span(codemap::Span);
-const EMPTY_SPAN: Span = Span::new(0, 0);
 
 impl Span {
-    pub const fn new(start: u32, end: u32) -> Self {
-        codemap::Span
+    pub fn from_spanned<T>(context: &Context, span: &toml::Spanned<T>) -> Self {
+        Self(
+            context
+                .file
+                .span
+                .subspan(span.start() as u64, span.end() as u64),
+        )
     }
 }
 
-impl<T> From<&toml::Spanned<T>> for Span {
-    fn from(span: &toml::Spanned<T>) -> Self {
-        Self::new(span.start() as u32, span.end() as u32)
+impl From<codemap::Span> for Span {
+    fn from(span: codemap::Span) -> Self {
+        Self(span)
     }
 }
 
-impl<T> From<toml::Spanned<T>> for Span {
-    fn from(span: toml::Spanned<T>) -> Self {
-        Self::new(span.start() as u32, span.end() as u32)
-    }
-}
 /*
 impl From<(usize, usize)> for Span {
     fn from(span: (usize, usize)) -> Self {
@@ -357,17 +350,19 @@ mod tests {
 
     #[test]
     #[should_panic]
-    fn drop_context() {
-        let manager = SourceManager::new("".to_owned());
-        let _ = manager.new_context();
+    fn dropped_diagnostic_builder_panics() {
+        let mut session = Session::new();
+        let mut context = session.testing("");
+        let _ = context.error("Test");
+        // ^^^ Builder dropped here
     }
 
     #[test]
     fn basic1() {
-        let manager = SourceManager::new("".to_owned());
-        let mut context = manager.new_context();
-        let _ = context.emitt_span((0, 0), Error::NoStates);
-        let errors = context.finish().unwrap_err();
-        assert_eq!(errors.errors().len(), 1);
+        let mut session = Session::new();
+        let mut context = session.testing("");
+        let _ = context.error("Test").emit();
+        let res = context.end_phase_and_emit();
+        assert_eq!(res.unwrap_err().len(), 1);
     }
 }

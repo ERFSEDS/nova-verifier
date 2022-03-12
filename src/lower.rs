@@ -32,9 +32,10 @@ impl<'s> Temp<'s> {
         match self.0.get(name.get_ref().as_str()) {
             Some(v) => Ok(*v),
             None => {
+                let span = Span::from_spanned(context, name);
                 context
                     .error(format!("state not found `{}`", name.get_ref()))
-                    .set_primary_span(name, format!("not found"))
+                    .set_primary_span(span, format!("not found"))
                     .emit();
                 Err(())
             }
@@ -44,17 +45,18 @@ impl<'s> Temp<'s> {
 
 // When we go to a low level file, the default state must be first
 pub fn verify(mid: upper::ConfigFile, context: &mut crate::Context) -> Result<ConfigFile, ()> {
+    let span = Span::from_spanned(context, &mid.states);
     if mid.states.get_ref().is_empty() {
         context
             .error(format!("states missing"))
-            .set_primary_span(&mid.states, "you need to have at least one state");
+            .set_primary_span(span, "you need to have at least one state");
         return Err(());
     }
     if mid.states.get_ref().len() > common::MAX_STATES as usize {
         context
             .error(format!("too many states"))
             .set_primary_span(
-                &mid.states,
+                span,
                 format!("the maxinum number of states is {}", common::MAX_STATES),
             )
             .emit();
@@ -99,7 +101,7 @@ pub(crate) fn convert_command(
     command: &Spanned<upper::Command>,
     context: &mut Context,
 ) -> Result<Command, ()> {
-    let span = command;
+    let span = Span::from_spanned(context, command);
     let command = command.get_ref();
 
     let mut count = 0;
@@ -129,19 +131,19 @@ pub(crate) fn convert_command(
         // More than one assignment found, expected one
         let mut values: std::vec::Vec<Span> = std::vec::Vec::new();
         if let Some(s) = &command.pyro1 {
-            values.push(s.into());
+            values.push(Span::from_spanned(context, s));
         }
         if let Some(s) = &command.pyro2 {
-            values.push(s.into());
+            values.push(Span::from_spanned(context, s));
         }
         if let Some(s) = &command.pyro3 {
-            values.push(s.into());
+            values.push(Span::from_spanned(context, s));
         }
         if let Some(s) = &command.data_rate {
-            values.push(s.into());
+            values.push(Span::from_spanned(context, s));
         }
         if let Some(s) = &command.becan {
-            values.push(s.into());
+            values.push(Span::from_spanned(context, s));
         }
 
         let mut err = context
@@ -155,7 +157,7 @@ pub(crate) fn convert_command(
             );
 
         for span in values {
-            err.span_label(span, "declared here");
+            err = err.span_label(span, "declared here");
         }
         err.emit();
     }
@@ -194,7 +196,7 @@ pub(crate) fn convert_check(
     temp: &Temp<'_>,
     context: &mut Context,
 ) -> Result<Check, ()> {
-    let full_span = check;
+    let full_span = Span::from_spanned(context, check);
     let check = check.get_ref();
     if check.upper_bound.is_some() && check.lower_bound.is_none()
         || check.upper_bound.is_none() && check.lower_bound.is_some()
@@ -222,30 +224,31 @@ pub(crate) fn convert_check(
     if count > 1 {
         let mut spans: std::vec::Vec<Span> = std::vec::Vec::new();
         if let Some(gt) = &check.greater_than {
-            spans.push(gt.into());
+            spans.push(Span::from_spanned(context, gt));
         }
         if let (Some(u), Some(l)) = (&check.greater_than, &check.lower_bound) {
-            spans.push(u.into());
-            spans.push(l.into());
+            spans.push(Span::from_spanned(context, u));
+            spans.push(Span::from_spanned(context, l));
         }
         if let Some(flag) = &check.flag {
-            spans.push(flag.into());
+            spans.push(Span::from_spanned(context, flag));
         }
 
         let mut err = context
             .error(format!("too many command actions"))
             .set_primary_span(
                 full_span,
-                Some(format!(
+                format!(
                     "you must specify exactly one check condition, not {}",
                     spans.len()
-                )),
+                ),
             );
 
         for span in spans {
-            err.span_label(span, "declared here");
+            err = err.span_label(span, "declared here");
         }
         err.emit();
+        return Err(());
     }
 
     enum CheckKind {
@@ -299,9 +302,10 @@ pub(crate) fn convert_check(
                 "set" => CheckCondition::FlagEq(true),
                 "unset" => CheckCondition::FlagEq(false),
                 _ => {
+                    let span = Span::from_spanned(context, flag);
                     context
                         .error(format!("flag values must be `set` or `unset`"))
-                        .set_primary_span(flag, format!("unknown flag value `{check_name}`"))
+                        .set_primary_span(span, format!("unknown flag value `{check_name}`"))
                         .emit();
                     return Err(());
                 }
@@ -311,12 +315,21 @@ pub(crate) fn convert_check(
         }
     };
 
+    let mismatch_err = |context: &mut Context, span, span_msg| -> Result<!, ()> {
+        let span = Span::from_spanned(context, span);
+        context
+            .error("mismatched check type")
+            .set_primary_span(span, span_msg)
+            .emit();
+        Err(())
+    };
+
     use common::{CheckData, FloatCondition, NativeFlagCondition, PyroContinuityCondition};
     // Perform type checking on kind and condition
     let data = match check_kind {
         CheckKind::Apogee => match condition {
             CheckCondition::FlagEq(val) => CheckData::ApogeeFlag(NativeFlagCondition(val)),
-            _ => panic!(),
+            _ => mismatch_err(context, &check.check, "")?,
         },
         CheckKind::Altitude => match condition {
             CheckCondition::Between {
@@ -360,23 +373,25 @@ pub(crate) fn convert_check(
         (Some(t), None) => Some(StateTransition::Transition(t.0)),
         (None, Some(a)) => Some(StateTransition::Abort(a.0)),
         (None, None) => None,
-        (Some(t), Some(a)) => {
+        (Some(mut t), Some(mut a)) => {
             if t.1.start() > a.1.start() {
                 // swap a and t so that t is always first
                 std::mem::swap(&mut t, &mut a);
             }
+            let s1 = Span::from_spanned(context, t.1);
+            let s2 = Span::from_spanned(context, a.1);
             context
                 .error(format!(
                     "abort and transition cannot be active in the same check"
                 ))
-                .set_primary_span_no_msg(t.1)
-                .span_label(a.1, format!("second action declared here"))
+                .set_primary_span_no_msg(s1)
+                .span_label(s2, format!("second action declared here"))
                 .emit();
 
             context
                 .help(format!("remove either `abort` or `transition`"))
-                .add_span(a.1)
-                .add_span(t.1)
+                .add_span(s1)
+                .add_span(s2)
                 .emit();
             return Err(());
         }
@@ -551,15 +566,15 @@ mod tests {
     }
 
     fn check_ok(input: upper::ConfigFile, expected: index::ConfigFile) {
-        let session = Session::new();
-        let context = session.testing("");
+        let mut session = Session::new();
+        let mut context = session.testing("");
         let cfg_file = super::verify(input, &mut context);
         let errors = context.end_phase();
 
         match errors {
             Ok(d) => {
                 d.emit();
-                panic!("Good");
+                assert_eq!(expected, cfg_file.unwrap());
             }
             Err(d) => {
                 d.emit();
@@ -569,8 +584,8 @@ mod tests {
     }
 
     fn check_error(input: upper::ConfigFile) {
-        let session = Session::new();
-        let context = session.testing("");
+        let mut session = Session::new();
+        let mut context = session.testing("");
         let cfg_file = super::verify(input, &mut context);
         let errors = context.end_phase();
 
@@ -584,7 +599,6 @@ mod tests {
             }
             Err(d) => {
                 d.emit();
-                panic!("Good");
             }
         }
     }

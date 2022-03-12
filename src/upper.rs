@@ -15,11 +15,12 @@ use toml::Spanned;
 
 use crate::Span;
 
-pub fn verify(toml: &str, context: &mut crate::Context) -> Result<ConfigFile, ()> {
-    match toml::from_str(toml) {
+pub fn verify(context: &mut crate::Context) -> Result<ConfigFile, ()> {
+    match toml::from_str(context.source()) {
         Ok(c) => Ok(c),
         Err(e) => {
-            let span = e.line_col().unwrap_or((0, 0));
+            let row_col = e.line_col().unwrap_or((0, 0));
+            let span = context.row_col_to_span(row_col);
             context
                 .error("failed to parse config file")
                 .set_primary_span(span, e.to_string())
@@ -204,10 +205,10 @@ mod tests {
         };
 
         fn check_verify(toml: &str, expected: ConfigFile) {
-            let session = Session::new();
-            let context = session.testing(toml);
+            let mut session = Session::new();
+            let mut context = session.testing(toml);
 
-            let parsed = verify(toml, &mut context);
+            let parsed = verify(&mut context);
             context.end_phase_and_emit().unwrap();
             assert_eq!(parsed.unwrap(), expected);
         }
@@ -313,8 +314,8 @@ greater_than = 100.0
         use nova_software_common as common;
         #[test]
         fn a() {
-            let session = Session::new();
-            let context = session.testing("");
+            let mut session = Session::new();
+            let mut context = session.testing("");
 
             let expected = common::index::Command::new(
                 common::CommandObject::Pyro1(true),

@@ -1,3 +1,4 @@
+#![feature(never_type)]
 //! There must be at least one state that doesn't transition to so that we can serialize and
 //! deserialize states. This prevents an infinite graph situation
 
@@ -20,7 +21,7 @@ pub fn verify<'session>(
     let mut all_diagnostics: Vec<Diagnostic> = Vec::new();
     let mut context = session.add_file(toml, file_path).unwrap();
 
-    let mid = upper::verify(&toml, &mut context);
+    let mid = upper::verify(&mut context);
     let warnings = context.end_phase_and_emit()?;
     let mid = mid.unwrap();
     all_diagnostics.extend(warnings);
