@@ -35,7 +35,7 @@ impl<'s> Temp<'s> {
                 let span = Span::from_spanned(context, name);
                 context
                     .error(format!("state not found `{}`", name.get_ref()))
-                    .set_primary_span(span, format!("not found"))
+                    .set_primary_span(span, "not found")
                     .emit();
                 Err(())
             }
@@ -48,13 +48,15 @@ pub fn verify(mid: upper::ConfigFile, context: &mut crate::Context) -> Result<Co
     let span = Span::from_spanned(context, &mid.states);
     if mid.states.get_ref().is_empty() {
         context
-            .error(format!("states missing"))
-            .set_primary_span(span, "you need to have at least one state");
+            .error("states missing")
+            .set_primary_span(span, "you need to have at least one state")
+            .emit();
+
         return Err(());
     }
     if mid.states.get_ref().len() > common::MAX_STATES as usize {
         context
-            .error(format!("too many states"))
+            .error("too many states")
             .set_primary_span(
                 span,
                 format!("the maxinum number of states is {}", common::MAX_STATES),
@@ -86,7 +88,7 @@ pub fn verify(mid: upper::ConfigFile, context: &mut crate::Context) -> Result<Co
         }
 
         for src_command in &src_state.get_ref().commands {
-            let command: index::Command = convert_command(&src_command, context)?;
+            let command: index::Command = convert_command(src_command, context)?;
             dst_state.commands.push(command).unwrap();
         }
     }
@@ -103,6 +105,7 @@ pub(crate) fn convert_command(
 ) -> Result<Command, ()> {
     let span = Span::from_spanned(context, command);
     let command = command.get_ref();
+    println!("Converting {command:?}");
 
     let mut count = 0;
     if command.pyro1.is_some() {
@@ -117,16 +120,17 @@ pub(crate) fn convert_command(
     if command.data_rate.is_some() {
         count += 1;
     }
-    if command.becan.is_some() {
+    if command.beacon.is_some() {
         count += 1;
     }
     if count == 0 {
         // TODO: emit better errors
         // Zero assignments fond, expected one
         context
-            .error(format!("command action missing"))
+            .error("command action missing")
             .set_primary_span(span, "you must specify one command action")
             .emit();
+        return Err(());
     } else if count > 1 {
         // More than one assignment found, expected one
         let mut values: std::vec::Vec<Span> = std::vec::Vec::new();
@@ -142,19 +146,17 @@ pub(crate) fn convert_command(
         if let Some(s) = &command.data_rate {
             values.push(Span::from_spanned(context, s));
         }
-        if let Some(s) = &command.becan {
+        if let Some(s) = &command.beacon {
             values.push(Span::from_spanned(context, s));
         }
 
-        let mut err = context
-            .error(format!("too many command actions"))
-            .set_primary_span(
-                span,
-                format!(
-                    "you must specify exactly one command action, not {}",
-                    values.len()
-                ),
-            );
+        let mut err = context.error("too many command actions").set_primary_span(
+            span,
+            format!(
+                "you must specify exactly one command action, not {}",
+                values.len()
+            ),
+        );
 
         for span in values {
             err = err.span_label(span, "declared here");
@@ -172,11 +174,11 @@ pub(crate) fn convert_command(
             CommandObject::Pyro3(pyro3.clone().into_inner().into())
         } else if let Some(data_rate) = &command.data_rate {
             CommandObject::DataRate(data_rate.clone().into_inner())
-        } else if let Some(becan) = &command.becan {
-            CommandObject::Beacon(becan.clone().into_inner().into())
+        } else if let Some(beacon) = &command.beacon {
+            CommandObject::Beacon(beacon.clone().into_inner().into())
         } else {
             // We return an error if fewer or more than one of the options are set
-            unreachable!()
+            unreachable!("{command:?}")
         }
     };
     Ok(index::Command {
@@ -217,7 +219,7 @@ pub(crate) fn convert_check(
     }
     if count == 0 {
         context
-            .error(format!("too many check conditions"))
+            .error("too many check conditions")
             .set_primary_span(full_span, "you must specify one check condition per check")
             .emit();
     }
@@ -234,15 +236,13 @@ pub(crate) fn convert_check(
             spans.push(Span::from_spanned(context, flag));
         }
 
-        let mut err = context
-            .error(format!("too many command actions"))
-            .set_primary_span(
-                full_span,
-                format!(
-                    "you must specify exactly one check condition, not {}",
-                    spans.len()
-                ),
-            );
+        let mut err = context.error("too many command actions").set_primary_span(
+            full_span,
+            format!(
+                "you must specify exactly one check condition, not {}",
+                spans.len()
+            ),
+        );
 
         for span in spans {
             err = err.span_label(span, "declared here");
@@ -280,6 +280,7 @@ pub(crate) fn convert_check(
         }
     };
 
+    #[allow(dead_code)]
     pub enum CheckCondition {
         FlagEq(bool),
         // Equals { value: f32 },
@@ -304,7 +305,7 @@ pub(crate) fn convert_check(
                 _ => {
                     let span = Span::from_spanned(context, flag);
                     context
-                        .error(format!("flag values must be `set` or `unset`"))
+                        .error("flag values must be `set` or `unset`")
                         .set_primary_span(span, format!("unknown flag value `{check_name}`"))
                         .emit();
                     return Err(());
@@ -381,15 +382,13 @@ pub(crate) fn convert_check(
             let s1 = Span::from_spanned(context, t.1);
             let s2 = Span::from_spanned(context, a.1);
             context
-                .error(format!(
-                    "abort and transition cannot be active in the same check"
-                ))
+                .error("abort and transition cannot be active in the same check")
                 .set_primary_span_no_msg(s1)
-                .span_label(s2, format!("second action declared here"))
+                .span_label(s2, "second action declared here")
                 .emit();
 
             context
-                .help(format!("remove either `abort` or `transition`"))
+                .help("remove either `abort` or `transition`")
                 .add_span(s1)
                 .add_span(s2)
                 .emit();

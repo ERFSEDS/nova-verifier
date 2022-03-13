@@ -3,7 +3,6 @@ use anyhow::Result;
 use clap::Parser;
 use codemap_diagnostic::Diagnostic;
 use log::*;
-use nova_verifier::Session;
 
 /// Command line utility for converting toml config files to .ncf files for the Nova Flight Computer
 #[derive(Parser, Debug)]
@@ -20,11 +19,11 @@ struct Args {
 
 fn main() {
     match run() {
-        Ok(warns) => {
-            println!("Verify finished with {} warnings", warns.len());
+        Ok(d) => {
+            info!("Verify finished with {} diagnostics", d.len());
         }
-        Err(e) => {
-            println!("Verify failed!");
+        Err(d) => {
+            info!("Verify failed with {} diagnostics!", d.len());
         }
     }
 }
@@ -33,18 +32,16 @@ fn run() -> Result<Vec<Diagnostic>, Vec<Diagnostic>> {
     pretty_env_logger::init();
     let args = Args::parse();
 
-    let input = args.input;
-    info!("Reading input file {input}");
+    let src_path = args.input;
+    let dst_path = args.output;
 
-    let toml = std::fs::read_to_string(&input).unwrap();
+    let r = nova_verifier::verify_file(src_path, dst_path.clone());
 
-    let mut session = Session::new();
-    // We ignore the warnings since they are emitted to the user by default
-    let (bytes, warns) = nova_verifier::verify(&mut session, toml, input)?;
+    let bytes = std::fs::read(dst_path).unwrap();
+    let obj: nova_software_common::index::ConfigFile = postcard::from_bytes(&bytes).unwrap();
+    if r.is_ok() {
+        info!("Encoded obj is: {obj:#?}");
+    }
 
-    let output = args.output;
-    info!("Writing converted configuration to {output}");
-    std::fs::write(&output, bytes).unwrap();
-
-    Ok(warns)
+    r
 }

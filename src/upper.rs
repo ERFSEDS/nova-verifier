@@ -5,15 +5,9 @@
 //! checks for valid toml. The returned [`ConfigFile`] may reference state or check names that don't
 //! exist, have negative timeouts, etc. This is the job of the low level verifier to check when it
 //! converts our [`ConfigFile`] to [`nova_software_common::index::ConfigFile`]
-use common::index;
-use common::CommandObject;
-use nova_software_common as common;
 
 use serde::{Deserialize, Serialize};
-use std::convert::TryInto;
 use toml::Spanned;
-
-use crate::Span;
 
 pub fn verify(context: &mut crate::Context) -> Result<ConfigFile, ()> {
     match toml::from_str(context.source()) {
@@ -51,13 +45,13 @@ pub struct State {
     /// The name of this state
     pub name: Spanned<String>,
 
-    pub timeout: Option<Spanned<Timeout>>,
-
     #[serde(default)]
     pub checks: Vec<Spanned<Check>>,
 
     #[serde(default)]
     pub commands: Vec<Spanned<Command>>,
+
+    pub timeout: Option<Spanned<Timeout>>,
 }
 
 /// Something relating to the external environment that the rocket will check to determine a future
@@ -109,12 +103,12 @@ pub struct TomlBool(bool);
 
 #[derive(Deserialize, Serialize, Debug, PartialEq)]
 pub struct Command {
+    pub data_rate: Option<Spanned<u16>>,
+    pub delay: Option<Spanned<f32>>,
     pub pyro1: Option<Spanned<TomlBool>>,
     pub pyro2: Option<Spanned<TomlBool>>,
     pub pyro3: Option<Spanned<TomlBool>>,
-    pub data_rate: Option<Spanned<u16>>,
-    pub becan: Option<Spanned<TomlBool>>,
-    pub delay: Option<Spanned<f32>>,
+    pub beacon: Option<Spanned<TomlBool>>,
 }
 
 impl From<TomlBool> for bool {
@@ -327,7 +321,7 @@ greater_than = 100.0
                 pyro2: None,
                 pyro3: None,
                 data_rate: None,
-                becan: None,
+                beacon: None,
                 delay: None,
             });
             assert_eq!(

@@ -1,5 +1,4 @@
 default_state = "PowerOn"
-aoesuthaoeush
 
 [[states]]
 name = "PowerOn"
@@ -32,9 +31,8 @@ flag = "unset"
 abort = "Safe"
 
 [[states.commands]]
-object = "dataRate"
-value = 1000
-time = 0.0
+data_rate = 1000
+delay = 0.0
 
 [[states]]
 name = "Flight"
@@ -47,24 +45,29 @@ transition = "Apogee"
 
 [[states]]
 name = "Apogee"
-timeout = { seconds = 0.0, transition = "Decent" }
+[states.timeout]
+seconds = 15.0
+transition = "End"
+
 
 [[states]]
 name = "Descent"
 delay = 4.0
-timeout = { seconds = 15.0, transition = "End" }
+
+[states.timeout]
+seconds = 15.0
+transition = "End"
 
 [[states.commands]]
-object = "dataRate"
-value = 500
-time = 0.0
+data_rate = 500
+delay = 0.0
 
 [[states]]
 name = "Parachute"
 
 [[states.commands]]
-object = "pyro1"
-value = 1.0
+pyro1 = "enable"
+delay = 5
 
 [[states.commands]]
 pyro2 = "enable"
@@ -75,4 +78,4 @@ name = "Recovery"
 
 [[states.commands]]
 beacon = "enable"
-time = 0.0
+delay = 0.0

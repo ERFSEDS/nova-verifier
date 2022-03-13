@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use codemap::CodeMap;
 use codemap_diagnostic::{ColorConfig, Diagnostic, Emitter, Level, SpanLabel, SpanStyle};
+use log::*;
 
 #[must_use]
 pub struct DiagnosticBuilder<'s, 'c> {
@@ -43,11 +44,20 @@ impl<'s, 'c> DiagnosticBuilder<'s, 'c> {
     }
 
     pub fn set_primary_span(mut self, span: impl Into<Span>, message: impl Into<String>) -> Self {
-        self.diagnostic.spans.push(SpanLabel {
-            span: span.into().0,
-            label: Some(message.into()),
-            style: SpanStyle::Primary,
-        });
+        let span = span.into();
+        // SAFETY: Span is two u32, so there are no invalid bit patterns,
+        // we need this to check if this is the "invalid span" from codemap, because trying to
+        // display an invalid span will show at the top of the file, confusing the user
+        let zero_span: Span = unsafe { std::mem::zeroed() };
+        if span != zero_span {
+            self.diagnostic.spans.push(SpanLabel {
+                span: span.0,
+                label: Some(message.into()),
+                style: SpanStyle::Primary,
+            });
+        } else {
+            info!("Not displaying");
+        }
 
         self
     }
@@ -152,6 +162,7 @@ impl<'s, 'c> Drop for DiagnosticBuilder<'s, 'c> {
 /// At the end of each logical phase, call [`Self::end_phase`] to get the list of errors emitted
 /// during that phase. Normal implementations should stop proceding through phases as soon as a
 /// phase completes with errors.
+#[derive(Default, Debug)]
 pub struct Session {
     map: codemap::CodeMap,
     diagnostics: Vec<Diagnostic>,
@@ -165,13 +176,13 @@ impl Session {
         }
     }
 
-    pub fn open_file<'s>(&'s mut self, file_path: String) -> Result<Context<'s>, ()> {
+    pub fn open_file(&mut self, file_path: String) -> Result<Context<'_>, ()> {
         let data = match std::fs::read_to_string(&file_path) {
             Ok(t) => t,
-            Err(v) => {
+            Err(e) => {
                 self.diagnostics.push(Diagnostic {
                     level: Level::Error,
-                    message: format!("Failed to open file `{file_path}`"),
+                    message: format!("Failed to open file `{file_path}`: {e}"),
                     code: None,
                     spans: Vec::new(),
                 });
@@ -181,7 +192,7 @@ impl Session {
         self.add_file(data, file_path)
     }
 
-    pub fn add_file<'s>(&'s mut self, data: String, file_path: String) -> Result<Context<'s>, ()> {
+    pub fn add_file(&mut self, data: String, file_path: String) -> Result<Context<'_>, ()> {
         let file = self.map.add_file(file_path, data);
         let context = Context {
             session: self,
@@ -191,7 +202,8 @@ impl Session {
         Ok(context)
     }
 
-    pub(crate) fn testing<'s>(&'s mut self, toml: &str) -> Context<'s> {
+    #[cfg(test)]
+    pub(crate) fn testing(&mut self, toml: &str) -> Context<'_> {
         let file = self.map.add_file("<anonymous>".to_owned(), toml.to_owned());
         let context = Context {
             session: self,
