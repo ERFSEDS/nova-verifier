@@ -105,7 +105,6 @@ pub(crate) fn convert_command(
 ) -> Result<Command, ()> {
     let span = Span::from_spanned(context, command);
     let command = command.get_ref();
-    println!("Converting {command:?}");
 
     let mut count = 0;
     if command.pyro1.is_some() {

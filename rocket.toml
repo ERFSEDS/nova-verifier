@@ -17,8 +17,6 @@ name = "AltitudeCheck"
 check = "altitude"
 greater_than = 200.0 # Tests too many conditions
 less_than = 200.0
-lower_bound = 200.0
-upper_bound = 200.0
 transition = "Flight"
 
 [[states.checks]]

@@ -55,8 +55,6 @@ impl<'s, 'c> DiagnosticBuilder<'s, 'c> {
                 label: Some(message.into()),
                 style: SpanStyle::Primary,
             });
-        } else {
-            info!("Not displaying");
         }
 
         self
@@ -234,6 +232,10 @@ impl<'c> Diagnostics<'c> {
 
     /// Emits all diagnostics to stderr, and appends them to `to_add`
     pub fn emit_and_extend(self, to_add: &mut Vec<Diagnostic>) {
+        if to_add.is_empty() {
+            //Emitting an empty vec still causes newlines to be printed in `Emitter::emit()`
+            return;
+        }
         let mut emitter = Emitter::stderr(ColorConfig::Auto, Some(self.codemap));
         emitter.emit(&self.diagnostics);
         to_add.extend(self.diagnostics);

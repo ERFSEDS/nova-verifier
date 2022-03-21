@@ -40,7 +40,7 @@ fn run() -> Result<Vec<Diagnostic>, Vec<Diagnostic>> {
     let bytes = std::fs::read(dst_path).unwrap();
     let obj: nova_software_common::index::ConfigFile = postcard::from_bytes(&bytes).unwrap();
     if r.is_ok() {
-        info!("Encoded obj is: {obj:#?}");
+        trace!("Encoded obj is: {obj:#?}");
     }
 
     r
